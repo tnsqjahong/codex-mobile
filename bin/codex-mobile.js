@@ -9,53 +9,151 @@ import { fileURLToPath } from "node:url";
 const execFile = promisify(execFileCallback);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
+const args = process.argv.slice(2);
 const port = Number(process.env.PORT || 8787);
-const host = process.env.HOST || "0.0.0.0";
-const openBrowser = !process.argv.includes("--no-open");
-const publicUrl = process.env.PUBLIC_URL?.replace(/\/$/, "") || `http://${host === "0.0.0.0" ? getLanAddress() : host}:${port}`;
+const localMode = args.includes("--local");
+const openBrowser = !args.includes("--no-open");
 const desktopUrl = `http://127.0.0.1:${port}`;
+const localLanUrl = `http://${getLanAddress()}:${port}`;
+const targetUrl = `http://127.0.0.1:${port}`;
+const children = [];
+let publicUrl = process.env.PUBLIC_URL?.replace(/\/$/, "") || null;
+let tunnel = null;
 
-if (process.argv.includes("--help")) {
-  console.log("Usage: codex-mobile [--no-open]");
+if (args.includes("--help")) {
+  console.log("Usage: codex-mobile [--no-open] [--local]");
   process.exit(0);
 }
 
-if (await isBridgeRunning()) {
-  console.log(`Codex Mobile Companion already running on ${desktopUrl}`);
-  if (openBrowser) await openUrl(desktopUrl);
-  process.exit(0);
+const bridgeWasRunning = await isBridgeRunning();
+if (!bridgeWasRunning) {
+  children.push(startBridge());
+  await waitForBridge();
 }
 
-const child = spawn(process.execPath, [path.join(rootDir, "src/bridge/server.js")], {
-  cwd: rootDir,
-  env: { ...process.env, HOST: host, PORT: String(port), PUBLIC_URL: process.env.PUBLIC_URL || publicUrl },
-  stdio: ["ignore", "inherit", "inherit"],
-});
+if (!publicUrl && !localMode) {
+  tunnel = await startRemoteTunnel(targetUrl).catch((error) => {
+    console.warn(`Remote tunnel failed: ${error.message}`);
+    return null;
+  });
+  publicUrl = tunnel?.url || localLanUrl;
+} else if (!publicUrl) {
+  publicUrl = localLanUrl;
+}
 
-child.on("exit", (code, signal) => {
-  process.exitCode = code ?? (signal ? 1 : 0);
-});
+await setPublicUrl(publicUrl);
 
-await waitForBridge();
-console.log(`Open desktop pairing window: ${desktopUrl}`);
+console.log(`${bridgeWasRunning ? "Codex Mobile Companion already running" : "Codex Mobile Companion running"} on ${desktopUrl}`);
 console.log(`Mobile QR will point to: ${publicUrl}`);
+if (!tunnel && !localMode && !process.env.PUBLIC_URL) {
+  console.log("Remote tunnel unavailable; QR is LAN-only until the tunnel can start.");
+}
 if (openBrowser) await openUrl(desktopUrl);
 
-process.on("SIGINT", () => child.kill("SIGINT"));
-process.on("SIGTERM", () => child.kill("SIGTERM"));
+if (bridgeWasRunning && !tunnel) process.exit(0);
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+function startBridge() {
+  const host = process.env.HOST || (localMode ? "0.0.0.0" : "127.0.0.1");
+  const child = spawn(process.execPath, [path.join(rootDir, "src/bridge/server.js")], {
+    cwd: rootDir,
+    env: { ...process.env, HOST: host, PORT: String(port), PUBLIC_URL: publicUrl || targetUrl },
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  child.on("exit", (code, signal) => {
+    if (!process.exitCode) process.exitCode = code ?? (signal ? 1 : 0);
+  });
+  return child;
+}
+
+async function startRemoteTunnel(target) {
+  const command = await resolveTunnelCommand();
+  console.log("Starting secure remote tunnel...");
+  const child = spawn(command.command, [...command.args, "tunnel", "--url", target], {
+    cwd: rootDir,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  children.push(child);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let output = "";
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("Timed out waiting for tunnel URL"));
+    }, 30_000);
+    const handleData = (chunk) => {
+      const text = chunk.toString("utf8");
+      output = `${output}${text}`.slice(-6000);
+      const match = text.match(/https:\/\/[-a-zA-Z0-9]+\.trycloudflare\.com/);
+      if (!match || settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ child, url: match[0] });
+    };
+    child.stdout.on("data", handleData);
+    child.stderr.on("data", handleData);
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(new Error(`Tunnel exited before URL was ready (${code}). ${output.trim()}`));
+    });
+  });
+}
+
+async function resolveTunnelCommand() {
+  if (await commandExists("cloudflared")) return { command: "cloudflared", args: [] };
+  if (await commandExists("npx")) return { command: "npx", args: ["--yes", "cloudflared"] };
+  throw new Error("cloudflared or npx is required for remote access");
+}
+
+async function commandExists(command) {
+  try {
+    await execFile(command, ["--version"], { timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function setPublicUrl(url) {
+  await postJson(`${desktopUrl}/api/desktop/public-url`, { publicUrl: url }, 1500).catch((error) => {
+    throw new Error(`Failed to set QR URL: ${error.message}`);
+  });
+}
 
 function getLanAddress() {
-  for (const entries of Object.values(os.networkInterfaces())) {
-    for (const entry of entries || []) {
-      if (entry.family === "IPv4" && !entry.internal) return entry.address;
-    }
+  const preferredNames = ["en0", "en1", "eth0", "wlan0"];
+  const interfaces = os.networkInterfaces();
+  for (const name of preferredNames) {
+    const address = firstUsableAddress(interfaces[name]);
+    if (address) return address;
+  }
+  for (const [name, entries] of Object.entries(interfaces)) {
+    if (/^(utun|awdl|llw|lo|bridge|feth)/.test(name)) continue;
+    const address = firstUsableAddress(entries);
+    if (address) return address;
   }
   return "127.0.0.1";
 }
 
+function firstUsableAddress(entries = []) {
+  return entries.find((entry) => entry.family === "IPv4" && !entry.internal)?.address || null;
+}
+
 async function isBridgeRunning() {
   try {
-    const health = await requestJson(`http://127.0.0.1:${port}/api/health`, 600);
+    const health = await requestJson(`${desktopUrl}/api/health`, 600);
     return Boolean(health.ok);
   } catch {
     return false;
@@ -76,24 +174,56 @@ function requestJson(url, timeout) {
     const req = http.get(url, { timeout }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => {
-        try {
-          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-        } catch (error) {
-          reject(error);
-        }
-      });
+      res.on("end", () => parseJsonResponse(chunks, resolve, reject));
     });
     req.on("timeout", () => req.destroy(new Error("timeout")));
     req.on("error", reject);
   });
 }
 
+function postJson(url, body, timeout) {
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(JSON.stringify(body));
+    const parsed = new URL(url);
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: `${parsed.pathname}${parsed.search}`,
+      method: "POST",
+      timeout,
+      headers: {
+        "content-type": "application/json",
+        "content-length": payload.length,
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => parseJsonResponse(chunks, resolve, reject));
+    });
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+    req.end(payload);
+  });
+}
+
+function parseJsonResponse(chunks, resolve, reject) {
+  try {
+    resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+  } catch (error) {
+    reject(error);
+  }
+}
+
 async function openUrl(url) {
   const platform = process.platform;
   const command = platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
-  const args = platform === "win32" ? ["/c", "start", "", url] : [url];
-  await execFile(command, args).catch(() => {
+  const openArgs = platform === "win32" ? ["/c", "start", "", url] : [url];
+  await execFile(command, openArgs).catch(() => {
     console.log(`Open this URL manually: ${url}`);
   });
+}
+
+function shutdown() {
+  for (const child of children) child.kill("SIGTERM");
+  process.exit(0);
 }

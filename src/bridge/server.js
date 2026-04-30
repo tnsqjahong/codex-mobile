@@ -24,6 +24,7 @@ const sessions = new Map();
 const activeTurns = new Map();
 const diffSnapshots = new Map();
 const tokenUsageSnapshots = new Map();
+let publicBaseUrlOverride = process.env.PUBLIC_URL?.replace(/\/$/, "") || null;
 let loginProcess = null;
 let loginFlow = {
   status: "idle",
@@ -106,6 +107,7 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, {
       ok: true,
       appServer: appServerStarted ? "ready" : "not_started",
+      bridgeUrl: getPublicBaseUrl(),
       version: "0.1.0",
     });
     return;
@@ -113,6 +115,17 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/desktop/status") {
     sendJson(res, 200, await getDesktopStatus());
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/desktop/public-url") {
+    if (!isLoopbackRequest(req)) {
+      sendJson(res, 403, { error: "Public URL can only be updated from this computer" });
+      return;
+    }
+    const body = await readJson(req);
+    publicBaseUrlOverride = normalizePublicUrl(body.publicUrl);
+    sendJson(res, 200, { publicUrl: publicBaseUrlOverride });
     return;
   }
 
@@ -874,9 +887,16 @@ function getLanAddress() {
 }
 
 function getPublicBaseUrl() {
-  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL.replace(/\/$/, "");
+  if (publicBaseUrlOverride) return publicBaseUrlOverride;
   const address = host === "0.0.0.0" ? getLanAddress() : host;
   return `http://${address}:${port}`;
+}
+
+function normalizePublicUrl(value) {
+  const text = String(value || "").trim().replace(/\/$/, "");
+  const parsed = new URL(text);
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Public URL must be http or https");
+  return parsed.toString().replace(/\/$/, "");
 }
 
 function summarizeConfig(config) {
