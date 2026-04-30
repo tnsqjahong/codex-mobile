@@ -421,6 +421,47 @@ select {
   padding-top: 8px;
 }
 
+.token-meter {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.token-meter div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.token-meter span,
+.token-meter p {
+  color: var(--muted);
+}
+
+.token-meter p {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.token-bar {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #11110f;
+}
+
+.token-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
 .ghost-button.danger {
   border-color: rgba(255, 155, 143, 0.45);
   color: var(--danger);

@@ -8,6 +8,7 @@ const state = {
   context: null,
   changes: null,
   branches: null,
+  tokenUsage: null,
   skills: [],
   models: [],
   modelConfig: null,
@@ -257,6 +258,7 @@ async function loadThread(threadId) {
   state.changes = null;
   state.context = null;
   state.branches = null;
+  state.tokenUsage = null;
   state.skills = [];
   const [result] = await Promise.all([
     fetchJson(`/api/threads/${encodeURIComponent(threadId)}`),
@@ -264,7 +266,7 @@ async function loadThread(threadId) {
   ]);
   state.thread = result.thread;
   state.selectedThread = state.thread;
-  await Promise.all([loadThreadContext(threadId), loadChanges(threadId), loadBranches(threadId), loadSkills(state.thread.cwd)]);
+  await Promise.all([loadThreadContext(threadId), loadChanges(threadId), loadBranches(threadId), loadTokenUsage(threadId), loadSkills(state.thread.cwd)]);
   state.approvals.clear();
   renderThread();
   subscribeThread(threadId);
@@ -294,6 +296,11 @@ async function loadChanges(threadId) {
 
 async function loadBranches(threadId) {
   state.branches = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/branches`);
+}
+
+async function loadTokenUsage(threadId) {
+  const result = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/token-usage`);
+  state.tokenUsage = result.tokenUsage || null;
 }
 
 async function loadSkills(cwd) {
@@ -470,6 +477,14 @@ function applyCodexEvent(event) {
         diff: event.params.diff || "",
         updatedAt: Date.now(),
       },
+    };
+  }
+
+  if (event.method === "thread/tokenUsage/updated") {
+    state.tokenUsage = {
+      turnId: event.params.turnId || null,
+      tokenUsage: event.params.tokenUsage || null,
+      updatedAt: Date.now(),
     };
   }
 
@@ -767,6 +782,7 @@ function renderThreadContext() {
           <strong>${escapeHtml(formatPermission(config))}</strong>
         </span>
       </div>
+      ${renderTokenUsage()}
       <div class="thread-actions">
         <button class="ghost-button compact" data-interrupt type="button">Stop</button>
         <button class="ghost-button compact" data-action="rename" type="button">Rename</button>
@@ -775,6 +791,26 @@ function renderThreadContext() {
         <button class="ghost-button compact" data-action="rollback" type="button">Rollback</button>
         <button class="ghost-button compact danger" data-action="archive" type="button">Archive</button>
       </div>
+    </section>
+  `;
+}
+
+function renderTokenUsage() {
+  const usage = state.tokenUsage?.tokenUsage || state.tokenUsage;
+  const total = usage?.total || null;
+  const totalTokens = Number(total?.totalTokens || 0);
+  const contextWindow = Number(usage?.modelContextWindow || state.context?.config?.modelContextWindow || state.modelConfig?.modelContextWindow || 0);
+  const percent = contextWindow ? Math.min(100, Math.round((totalTokens / contextWindow) * 100)) : 0;
+  const remaining = contextWindow ? Math.max(0, contextWindow - totalTokens) : null;
+  if (!totalTokens && !contextWindow) return "";
+  return `
+    <section class="token-meter" aria-label="Token usage">
+      <div>
+        <strong>${formatCompactNumber(totalTokens)} used</strong>
+        <span>${remaining == null ? "Context window unknown" : `${formatCompactNumber(remaining)} left of ${formatCompactNumber(contextWindow)}`}</span>
+      </div>
+      <div class="token-bar"><span style="width:${percent}%"></span></div>
+      ${total ? `<p>Input ${formatCompactNumber(total.inputTokens)} · Output ${formatCompactNumber(total.outputTokens)} · Reasoning ${formatCompactNumber(total.reasoningOutputTokens)}</p>` : ""}
     </section>
   `;
 }
@@ -1026,6 +1062,11 @@ function formatDate(seconds) {
 function formatClock(milliseconds) {
   if (!milliseconds) return "";
   return new Intl.DateTimeFormat("ko", { timeStyle: "short" }).format(new Date(milliseconds));
+}
+
+function formatCompactNumber(value) {
+  const number = Number(value || 0);
+  return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(number);
 }
 
 function folderIcon() {

@@ -62,6 +62,7 @@ Expected result: recent Codex threads are printed, including threads visible in 
 - `GET /api/threads/:threadId`
 - `GET /api/threads/:threadId/context`
 - `GET /api/threads/:threadId/changes`
+- `GET /api/threads/:threadId/token-usage`
 - `GET /api/threads/:threadId/branches`
 - `POST /api/threads/:threadId/git/checkout`
 - `POST /api/threads/:threadId/git/commit`
@@ -85,6 +86,7 @@ Implemented:
 - Local QR SVG generation for pairing URLs.
 - Mobile PWA shell with project/thread/detail views.
 - Desktop-like thread controls for branch switching/creation, model, reasoning effort, permission summary, chat, and changes.
+- Live thread token usage meter backed by App Server `thread/tokenUsage/updated` events.
 - Working-tree changes endpoint backed by Git status/diff data.
 - Commit-all action for current working-tree changes from the mobile changes panel.
 - New thread creation, project/thread search UI, stop button, and thread actions for rename, fork, compact, rollback, and archive.

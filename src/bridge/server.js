@@ -23,6 +23,7 @@ const pairings = new Map();
 const sessions = new Map();
 const activeTurns = new Map();
 const diffSnapshots = new Map();
+const tokenUsageSnapshots = new Map();
 let loginProcess = null;
 let loginFlow = {
   status: "idle",
@@ -338,6 +339,17 @@ async function handleApi(req, res, url) {
     const changes = await getGitChanges(threadResult.thread.cwd);
     const turnDiff = diffSnapshots.get(threadId) || null;
     sendJson(res, 200, { ...changes, threadId, turnDiff });
+    return;
+  }
+
+  const tokenUsageMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/token-usage$/);
+  if (req.method === "GET" && tokenUsageMatch) {
+    await ensureAppServerStarted();
+    const threadId = decodeURIComponent(tokenUsageMatch[1]);
+    sendJson(res, 200, {
+      threadId,
+      tokenUsage: tokenUsageSnapshots.get(threadId) || null,
+    });
     return;
   }
 
@@ -682,6 +694,13 @@ function trackTurn(message) {
       updatedAt: Date.now(),
     });
   }
+  if (message.method === "thread/tokenUsage/updated" && params.threadId) {
+    tokenUsageSnapshots.set(params.threadId, {
+      turnId: params.turnId || null,
+      tokenUsage: params.tokenUsage || null,
+      updatedAt: Date.now(),
+    });
+  }
 }
 
 function extractThreadId(message) {
@@ -871,6 +890,8 @@ function summarizeConfig(config) {
     summary: pick("model_reasoning_summary"),
     approvalPolicy: pick("approval_policy"),
     approvalsReviewer: pick("approvals_reviewer"),
+    modelContextWindow: pick("model_context_window"),
+    modelAutoCompactTokenLimit: pick("model_auto_compact_token_limit"),
     sandboxMode: config.sandbox_mode || null,
     sandboxWorkspaceWrite: config.sandbox_workspace_write || null,
   };

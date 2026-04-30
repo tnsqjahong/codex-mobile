@@ -103,6 +103,7 @@ Bridge-level Git helpers for desktop parity:
 - `GET /api/threads/:threadId/branches`: list local branches for the thread `cwd`.
 - `POST /api/threads/:threadId/git/checkout`: checkout or create a branch in the thread `cwd`.
 - `POST /api/threads/:threadId/git/commit`: stage and commit current working-tree changes after explicit mobile confirmation.
+- `GET /api/threads/:threadId/token-usage`: return the latest cached token usage snapshot observed for the thread.
 
 Useful events/items:
 
@@ -112,6 +113,7 @@ Useful events/items:
 - `turn/started`
 - `turn/completed`
 - `turn/diff/updated`
+- `thread/tokenUsage/updated`
 - `item/started`
 - `item/agentMessage/delta`
 - `item/completed`
