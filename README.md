@@ -1,6 +1,6 @@
 # Codex Mobile Companion
 
-Mobile-first PWA prototype for connecting a phone to the local Codex session layer exposed by `codex app-server`.
+Mobile companion for using the local Codex session layer from a phone.
 
 This project intentionally uses **local-session mode** only:
 
@@ -10,7 +10,7 @@ This project intentionally uses **local-session mode** only:
 - No hosted relay, paid domain, ngrok account, or long-lived remote service is required.
 - Notifications are session notifications: they work while the mobile PWA/browser remains connected to the desktop bridge.
 
-The bridge does not read Codex SQLite/JSONL state directly. It starts `codex app-server` over stdio, then exposes a small HTTP/WebSocket API for the mobile UI.
+The bridge starts `codex app-server` over stdio and exposes a small HTTP/WebSocket API for the mobile UI. It does not read Codex SQLite/JSONL state directly.
 
 ## Run
 
@@ -122,7 +122,7 @@ Known next work:
 
 ## Install Reality
 
-The QR code can open the paired mobile web app, but it cannot silently install it. Android Chromium can show a user-approved PWA install prompt. iOS requires Safari's Add to Home Screen flow for PWAs, or a native App Clip/App Store path for a more app-like scan experience.
+The QR code can open the paired mobile web app, but it cannot silently install it. Android Chromium can show a user-approved PWA install prompt. iOS requires Safari's Add to Home Screen flow for PWAs.
 
 Because the default tunnel is intentionally temporary, an installed PWA is tied to the current desktop session URL. After restarting the desktop companion, scan the new QR and install/open that session again if needed.
 
@@ -139,7 +139,7 @@ npm run setup
 npm start
 ```
 
-The setup command requires no npm install because the prototype has no external dependencies. For general users, this should become a packaged macOS desktop app that bundles Node or a compiled runtime, runs the same checks in a first-run wizard, and starts the bridge without exposing Terminal.
+The setup command requires no npm install because the project has no external dependencies. A packaged desktop wrapper can later run the same checks and bridge without exposing Terminal.
 
 In the packaged desktop app, users should not run `codex login --device-auth` themselves. The app should start that flow internally when needed, wait for the browser-based OpenAI login to complete, then enable the QR button.
 

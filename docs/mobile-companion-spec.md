@@ -8,9 +8,9 @@ The mobile client should not mirror the desktop screen. It should use the same C
 
 Current product decision: ship local-session mode only. The desktop companion creates a temporary QR pairing URL for the current run, the phone connects for that desktop session, and users scan a fresh QR after restart. Do not introduce hosted relay, paid domain, ngrok account setup, or long-lived origin requirements in the default open-source path.
 
-## Verified Local Codex Behavior
+## Verified Codex Behavior
 
-Observed on this machine:
+Observed integration facts:
 
 - Codex Desktop stores session metadata under `~/.codex`.
 - Fast thread/project index lives in `~/.codex/state_5.sqlite`.
@@ -19,17 +19,6 @@ Observed on this machine:
 - `threads.rollout_path` points to the JSONL for each thread.
 - `~/.codex/session_index.jsonl` is a lightweight title/update index.
 - `codex app-server` exposes the same thread data via JSON-RPC.
-
-Current selected Desktop thread from screenshot:
-
-- `id`: `019ddc06-ab8c-7832-907e-f24a720b2146`
-- `title`: `모바일 Codex 앱 설계`
-- `cwd`: `/Users/hongsunbeom/Desktop/codex-mobile`
-- `originator`: `Codex Desktop`
-- `source`: `vscode`
-- `model`: `gpt-5.5`
-- `reasoning_effort`: `high`
-- `rollout_path`: `/Users/hongsunbeom/.codex/sessions/2026/04/30/rollout-2026-04-30T10-35-17-019ddc06-ab8c-7832-907e-f24a720b2146.jsonl`
 
 Important inference:
 
@@ -191,32 +180,22 @@ Responsibilities:
 - Lazily start `codex app-server` after desktop readiness is confirmed.
 - Spawn and own `codex app-server` over stdio.
 - Perform JSON-RPC request/response correlation.
-- Subscribe to and relay server notifications.
+- Subscribe to and forward server notifications.
 - Expose a small mobile-friendly HTTP/WebSocket API.
 - Manage QR pairing.
 - Manage mobile session tokens.
 - Redact sensitive output before sending to mobile.
 - Keep Codex App Server bound to local process/stdio, not public network.
 
-Suggested stack:
+Runtime:
 
 - Node.js 20+.
-- Fastify or Hono for HTTP.
-- `ws` for WebSocket.
-- Zod for bridge API validation.
-- No direct new database for MVP; in-memory sessions are enough.
+- No direct new database for local-session mode; in-memory sessions are enough.
 
-Current prototype note:
+Current implementation note:
 
 - The first implementation intentionally uses only Node built-ins: `http`, `crypto`, `child_process`, and a small WebSocket frame implementation.
 - This keeps the bootstrap path dependency-free while the Codex App Server contract is still being validated.
-- If the API shape stabilizes, replacing the HTTP/WebSocket layer with Fastify/Hono + `ws` is straightforward.
-
-Later:
-
-- SQLite for paired device records and audit logs.
-- LaunchAgent/tray companion.
-- Relay server for non-LAN access.
 
 ## Bridge HTTP API
 
@@ -568,14 +547,11 @@ Server message types:
 
 ## Mobile PWA
 
-Recommended stack:
+Implementation:
 
-- Vite + React + TypeScript.
+- Dependency-free PWA shell.
 - PWA manifest + service worker.
-- TanStack Query for HTTP state.
-- Zustand or lightweight reducer for live thread event state.
-- CSS modules or Tailwind, depending on preference at implementation time.
-- Icons from lucide-react.
+- Lightweight in-memory state for HTTP and live thread events.
 
 Primary views:
 
@@ -585,19 +561,13 @@ Primary views:
    - device name.
    - failure/retry states.
 
-2. Projects
-   - grouped by working directory.
-   - latest thread preview.
-   - search.
-   - new thread.
+2. Workspace
+   - project selector.
+   - sidebar thread list.
+   - local thread search.
+   - new thread in current project.
 
-3. Thread List
-   - all threads for selected project.
-   - title, updated time, status.
-   - search.
-   - new thread in this project.
-
-4. Thread Detail
+3. Thread Detail
    - chat timeline.
    - compact command/file cards.
    - branch, model, reasoning effort, and permission summary.
@@ -607,7 +577,7 @@ Primary views:
    - approval cards.
    - thread actions: rename, fork, compact, rollback, archive.
 
-5. Settings
+4. Settings
    - paired desktop.
    - disconnect/revoke.
    - bridge status.
@@ -621,7 +591,6 @@ What is possible:
 - Scanning the QR opens the mobile web app with `?pair=<code>`.
 - Android Chromium browsers can show a PWA install prompt after the page satisfies installability rules and after a user gesture.
 - iOS can install a PWA through Safari's Share menu and Add to Home Screen flow.
-- iOS App Clips can launch from QR/App Clip Codes, but that requires a native iOS target, App Store Connect setup, and Apple App Clip infrastructure.
 
 What is not possible for the PWA route:
 
@@ -646,12 +615,6 @@ Session notification scope:
 - Use the active WebSocket session to surface approval-needed and turn-completed notifications while the mobile app/browser remains connected.
 - Do not claim closed-app push support in local-session mode.
 - Closed-app push requires a stable origin and Web Push subscription storage, which is intentionally out of scope for the default open-source path.
-
-Native/app-store path later:
-
-- Android: Trusted Web Activity or native wrapper can publish to Play Store.
-- iOS: native wrapper can publish to App Store; App Clip can provide scan-and-open lightweight native experience.
-- Neither iOS nor Android should be designed around silent installation. User confirmation remains the normal boundary.
 
 Mobile UX constraints:
 
@@ -697,7 +660,7 @@ Deliverable:
 Acceptance:
 
 - Lists the same recent threads visible in Codex Desktop.
-- Reads the current `모바일 Codex 앱 설계` thread.
+- Reads a selected thread by id.
 
 ### Phase 1: Bridge MVP
 
@@ -711,7 +674,7 @@ Deliverable:
   - `GET /threads/:threadId`
   - `POST /threads/:threadId/messages`
   - `POST /threads/:threadId/interrupt`
-- WebSocket event relay.
+- WebSocket event forwarding.
 
 Acceptance:
 
@@ -756,7 +719,8 @@ Current status:
 
 - Pairing code and QR target URL are implemented.
 - Actual local QR SVG rendering is implemented in `src/bridge/qr.js`.
-- For LAN phone testing, run the bridge with `HOST=0.0.0.0` and optionally `PUBLIC_URL=http://<desktop-lan-ip>:8787`.
+- By default, `npm start` attempts a temporary HTTPS tunnel for phone access over mobile data.
+- For LAN-only pairing, run `npm start -- --local`.
 
 ### Phase 4: Approvals And Tool Cards
 
