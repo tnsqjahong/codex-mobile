@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "codex-mobile": "./bin/codex-mobile.js"
+  },
   "scripts": {
+    "cli": "node bin/codex-mobile.js",
     "start": "node src/bridge/server.js",
     "doctor": "node src/bridge/doctor.js",
     "setup": "npm run doctor",

@@ -18,6 +18,15 @@ Then start the local companion:
 npm start
 ```
 
+Or use the desktop-style launcher command:
+
+```sh
+npm link
+codex-mobile
+```
+
+`codex-mobile` starts the bridge on the LAN, opens the desktop pairing window, checks Codex CLI/login status there, and lets the user show the QR.
+
 Development URL:
 
 ```text
