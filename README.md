@@ -2,6 +2,14 @@
 
 Mobile-first PWA prototype for connecting a phone to the local Codex session layer exposed by `codex app-server`.
 
+This project intentionally uses **local-session mode** only:
+
+- `npm start` opens a desktop pairing page and creates a temporary HTTPS tunnel when possible.
+- The QR code pairs a phone for the lifetime of the desktop companion process.
+- If the desktop companion/tunnel restarts, the user scans a fresh QR.
+- No hosted relay, paid domain, ngrok account, or long-lived remote service is required.
+- Notifications are session notifications: they work while the mobile PWA/browser remains connected to the desktop bridge.
+
 The bridge does not read Codex SQLite/JSONL state directly. It starts `codex app-server` over stdio, then exposes a small HTTP/WebSocket API for the mobile UI.
 
 ## Run
@@ -18,7 +26,7 @@ Then start the local companion:
 npm start
 ```
 
-`npm start` starts the bridge, creates a temporary HTTPS remote tunnel when possible, opens the desktop pairing window, checks Codex CLI/login status there, and shows a QR that can be opened from mobile data.
+`npm start` starts the bridge, creates a temporary HTTPS remote tunnel when possible, opens the desktop pairing window, checks Codex CLI/login status there, warms Codex App Server, and shows a QR that can be opened from mobile data.
 
 Later, when installed globally, the same launcher is available as:
 
@@ -103,6 +111,8 @@ Implemented:
 - Desktop-style `$skill` picker in the chat composer, backed by installed skills from App Server.
 - PWA install CTA for Android Chromium and in-app Home Screen guidance for iOS Safari.
 - Message send with model/effort overrides, interrupt, approval response, and WebSocket event handling hooks.
+- Session notifications for approval requests and completed Codex turns while the mobile PWA/browser is connected.
+- QR-time Codex App Server and project-cache prewarm so mobile opens quickly after scanning.
 
 Known next work:
 
@@ -113,6 +123,10 @@ Known next work:
 ## Install Reality
 
 The QR code can open the paired mobile web app, but it cannot silently install it. Android Chromium can show a user-approved PWA install prompt. iOS requires Safari's Add to Home Screen flow for PWAs, or a native App Clip/App Store path for a more app-like scan experience.
+
+Because the default tunnel is intentionally temporary, an installed PWA is tied to the current desktop session URL. After restarting the desktop companion, scan the new QR and install/open that session again if needed.
+
+Closed-app push notifications are intentionally out of scope for local-session mode because mobile browsers require a stable origin plus Web Push subscription storage for that. This project only targets notifications while the paired mobile app is connected during the current desktop session.
 
 ## Simple User Path
 

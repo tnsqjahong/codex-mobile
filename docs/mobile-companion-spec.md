@@ -6,6 +6,8 @@ Build a mobile web app/PWA that lets a user connect their phone to the Codex run
 
 The mobile client should not mirror the desktop screen. It should use the same Codex session/thread layer that Codex Desktop, Codex CLI, and IDE clients already share.
 
+Current product decision: ship local-session mode only. The desktop companion creates a temporary QR pairing URL for the current run, the phone connects for that desktop session, and users scan a fresh QR after restart. Do not introduce hosted relay, paid domain, ngrok account setup, or long-lived origin requirements in the default open-source path.
+
 ## Verified Local Codex Behavior
 
 Observed on this machine:
@@ -633,10 +635,17 @@ Recommended product UX:
 2. Desktop companion checks Codex CLI and Codex login automatically.
 3. If login is missing, desktop companion starts the OpenAI login/device-auth flow itself.
 4. Only after desktop setup is ready, desktop companion shows a large local QR code.
-5. Phone camera opens `http://<desktop-lan-ip>:8787/?pair=<code>`.
-6. Mobile PWA completes pairing and opens the Codex project list.
-7. If supported, show an Install button that calls the browser install prompt.
-8. Otherwise show a compact platform-specific install hint in settings.
+5. Desktop companion warms Codex App Server and the project/thread index while the QR is visible.
+6. Phone camera opens the temporary pairing URL for this desktop session.
+7. Mobile PWA completes pairing and opens the Codex workspace shell.
+8. If supported, show an Install button that calls the browser install prompt.
+9. Otherwise show a compact platform-specific install hint in settings.
+
+Session notification scope:
+
+- Use the active WebSocket session to surface approval-needed and turn-completed notifications while the mobile app/browser remains connected.
+- Do not claim closed-app push support in local-session mode.
+- Closed-app push requires a stable origin and Web Push subscription storage, which is intentionally out of scope for the default open-source path.
 
 Native/app-store path later:
 
@@ -657,7 +666,7 @@ Mobile UX constraints:
 MVP security rules:
 
 - Do not expose `codex app-server` directly to mobile.
-- Bridge listens on LAN only during development.
+- Bridge listens on localhost by default and uses a temporary HTTPS tunnel for mobile data access when available.
 - QR pairing codes expire in 60 seconds.
 - Access token expires quickly.
 - Redact obvious secrets:
@@ -674,9 +683,8 @@ Production security:
 - Desktop confirmation for pairing.
 - Device key binding.
 - Revocation UI.
-- HTTPS on LAN or relay TLS.
+- HTTPS tunnel health checks and clear desktop status.
 - Audit log for mobile-originated messages and approvals.
-- Optional relay with end-to-end device authorization.
 
 ## Implementation Phases
 
@@ -773,7 +781,7 @@ Deliverable:
 
 Acceptance:
 
-- User starts bridge, scans QR, and uses mobile UI without touching terminal details.
+- User starts bridge, scans QR, and uses mobile UI for the current desktop session without touching terminal details.
 
 ## Open Questions
 
@@ -788,5 +796,4 @@ Acceptance:
 2. Harden approval response mapping per approval request schema.
 3. Add paired-device revocation and desktop-side confirmation.
 4. Add plugin/automation mutation screens only after safety review.
-5. Add install CTA/manual install hints per platform.
-6. Package the desktop bridge as a double-clickable macOS companion.
+5. Package the desktop bridge as a double-clickable macOS companion.

@@ -25,7 +25,6 @@ const state = {
   desktopReady: false,
   installPrompt: null,
   installSkipped: sessionStorage.getItem("codexMobileInstallSkipped") === "true",
-  notificationPrompted: localStorage.getItem("codexMobileNotifications") === "enabled",
   notificationsEnabled: "Notification" in window && Notification.permission === "granted" && localStorage.getItem("codexMobileNotifications") === "enabled",
   swRegistration: null,
   sidebarOpen: window.matchMedia("(min-width: 900px)").matches,
@@ -422,7 +421,6 @@ async function enableNotifications() {
     return;
   }
   const permission = await Notification.requestPermission();
-  state.notificationPrompted = true;
   if (permission === "granted") {
     state.notificationsEnabled = true;
     localStorage.setItem("codexMobileNotifications", "enabled");
