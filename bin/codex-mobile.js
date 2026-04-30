@@ -12,7 +12,8 @@ const rootDir = path.resolve(__dirname, "..");
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || "0.0.0.0";
 const openBrowser = !process.argv.includes("--no-open");
-const baseUrl = process.env.PUBLIC_URL?.replace(/\/$/, "") || `http://${host === "0.0.0.0" ? getLanAddress() : host}:${port}`;
+const publicUrl = process.env.PUBLIC_URL?.replace(/\/$/, "") || `http://${host === "0.0.0.0" ? getLanAddress() : host}:${port}`;
+const desktopUrl = `http://127.0.0.1:${port}`;
 
 if (process.argv.includes("--help")) {
   console.log("Usage: codex-mobile [--no-open]");
@@ -20,14 +21,14 @@ if (process.argv.includes("--help")) {
 }
 
 if (await isBridgeRunning()) {
-  console.log(`Codex Mobile Companion already running on ${baseUrl}`);
-  if (openBrowser) await openUrl(baseUrl);
+  console.log(`Codex Mobile Companion already running on ${desktopUrl}`);
+  if (openBrowser) await openUrl(desktopUrl);
   process.exit(0);
 }
 
 const child = spawn(process.execPath, [path.join(rootDir, "src/bridge/server.js")], {
   cwd: rootDir,
-  env: { ...process.env, HOST: host, PORT: String(port), PUBLIC_URL: process.env.PUBLIC_URL || baseUrl },
+  env: { ...process.env, HOST: host, PORT: String(port), PUBLIC_URL: process.env.PUBLIC_URL || publicUrl },
   stdio: ["ignore", "inherit", "inherit"],
 });
 
@@ -36,8 +37,9 @@ child.on("exit", (code, signal) => {
 });
 
 await waitForBridge();
-console.log(`Open desktop pairing window: ${baseUrl}`);
-if (openBrowser) await openUrl(baseUrl);
+console.log(`Open desktop pairing window: ${desktopUrl}`);
+console.log(`Mobile QR will point to: ${publicUrl}`);
+if (openBrowser) await openUrl(desktopUrl);
 
 process.on("SIGINT", () => child.kill("SIGINT"));
 process.on("SIGTERM", () => child.kill("SIGTERM"));
