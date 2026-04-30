@@ -8,6 +8,7 @@ const state = {
   context: null,
   changes: null,
   branches: null,
+  skills: [],
   models: [],
   modelConfig: null,
   selectedModel: localStorage.getItem("codexMobileModel") || "",
@@ -256,13 +257,14 @@ async function loadThread(threadId) {
   state.changes = null;
   state.context = null;
   state.branches = null;
+  state.skills = [];
   const [result] = await Promise.all([
     fetchJson(`/api/threads/${encodeURIComponent(threadId)}`),
     loadModels(),
   ]);
   state.thread = result.thread;
   state.selectedThread = state.thread;
-  await Promise.all([loadThreadContext(threadId), loadChanges(threadId), loadBranches(threadId)]);
+  await Promise.all([loadThreadContext(threadId), loadChanges(threadId), loadBranches(threadId), loadSkills(state.thread.cwd)]);
   state.approvals.clear();
   renderThread();
   subscribeThread(threadId);
@@ -292,6 +294,12 @@ async function loadChanges(threadId) {
 
 async function loadBranches(threadId) {
   state.branches = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/branches`);
+}
+
+async function loadSkills(cwd) {
+  const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
+  const result = await fetchJson(`/api/skills${query}`);
+  state.skills = result.data || [];
 }
 
 async function sendMessage(text) {
@@ -576,6 +584,7 @@ function renderChat(turns) {
 
 function renderComposer() {
   return `
+    <div class="skill-picker" id="skill-picker" hidden></div>
     <form class="composer" id="composer">
       <textarea id="message-input" placeholder="Message Codex"></textarea>
       <button aria-label="Send">↑</button>
@@ -589,8 +598,12 @@ function bindThreadControls() {
     const input = app.querySelector("#message-input");
     const text = input.value;
     input.value = "";
+    hideSkillSuggestions();
     await sendMessage(text);
   });
+  const messageInput = app.querySelector("#message-input");
+  messageInput?.addEventListener("input", () => updateSkillSuggestions(messageInput));
+  messageInput?.addEventListener("selectionchange", () => updateSkillSuggestions(messageInput));
   app.querySelectorAll("[data-approval]").forEach((button) => {
     button.addEventListener("click", () => {
       answerApproval(button.dataset.approval, button.dataset.decision, button.dataset.remember === "true");
@@ -651,6 +664,70 @@ function bindThreadControls() {
   });
   const scroll = app.querySelector(".main-scroll");
   if (scroll && state.activeTab === "chat") scroll.scrollTop = scroll.scrollHeight;
+}
+
+function updateSkillSuggestions(input) {
+  const picker = app.querySelector("#skill-picker");
+  if (!picker) return;
+  const token = getSkillToken(input);
+  if (!token) {
+    hideSkillSuggestions();
+    return;
+  }
+  const query = token.query.toLowerCase();
+  const matches = state.skills
+    .filter((skill) => {
+      const haystack = `${skill.name || ""} ${skill.description || ""}`.toLowerCase();
+      return haystack.includes(query);
+    })
+    .slice(0, 8);
+  picker.hidden = false;
+  picker.innerHTML = `
+    <div class="skill-picker-header">
+      <strong>Skills</strong>
+      <span>${matches.length ? "Tap to insert" : "No installed skills found"}</span>
+    </div>
+    ${matches.map((skill) => `
+      <button class="skill-option" data-skill="${escapeAttr(skill.name)}" type="button">
+        <strong>$${escapeHtml(skill.name)}</strong>
+        ${skill.description ? `<span>${escapeHtml(skill.description)}</span>` : ""}
+      </button>
+    `).join("")}
+  `;
+  picker.querySelectorAll("[data-skill]").forEach((button) => {
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      insertSkillToken(input, token, button.dataset.skill);
+    });
+  });
+}
+
+function hideSkillSuggestions() {
+  const picker = app.querySelector("#skill-picker");
+  if (picker) picker.hidden = true;
+}
+
+function getSkillToken(input) {
+  const cursor = input.selectionStart || 0;
+  const before = input.value.slice(0, cursor);
+  const match = before.match(/(^|\s)\$([A-Za-z0-9_-]*)$/);
+  if (!match) return null;
+  return {
+    start: cursor - match[2].length - 1,
+    end: cursor,
+    query: match[2],
+  };
+}
+
+function insertSkillToken(input, token, skillName) {
+  const before = input.value.slice(0, token.start);
+  const after = input.value.slice(token.end);
+  const inserted = `$${skillName} `;
+  input.value = `${before}${inserted}${after}`;
+  const cursor = before.length + inserted.length;
+  input.focus();
+  input.setSelectionRange(cursor, cursor);
+  hideSkillSuggestions();
 }
 
 function renderThreadContext() {

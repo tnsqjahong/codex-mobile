@@ -89,6 +89,7 @@ Core methods for MVP:
 - `turn/start`: send a user message and start agent work.
 - `turn/interrupt`: stop an active turn.
 - `model/list`: read the same model picker options Codex Desktop exposes.
+- `skills/list`: read installed skills for the current workspace and power the mobile `$skill` picker.
 - `config/read`: read default model, reasoning effort, approval, and sandbox config.
 - `account/read`, `account/rateLimits/read`: account and usage settings.
 - `plugin/list`, `skills/list`, `app/list`, `mcpServerStatus/list`, `experimentalFeature/list`: Desktop settings/catalog surfaces.

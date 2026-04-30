@@ -56,6 +56,7 @@ Expected result: recent Codex threads are printed, including threads visible in 
 - `GET /api/projects`
 - `POST /api/threads`
 - `GET /api/models`
+- `GET /api/skills`
 - `GET /api/settings`
 - `GET /api/threads?cwd=<path>`
 - `GET /api/threads/:threadId`
@@ -88,6 +89,7 @@ Implemented:
 - Commit-all action for current working-tree changes from the mobile changes panel.
 - New thread creation, project/thread search UI, stop button, and thread actions for rename, fork, compact, rollback, and archive.
 - Settings surface for account, rate limits, runtime config, plugins, skills, apps, MCP servers, and automations.
+- Desktop-style `$skill` picker in the chat composer, backed by installed skills from App Server.
 - PWA install CTA for Android Chromium and in-app Home Screen guidance for iOS Safari.
 - Message send with model/effort overrides, interrupt, approval response, and WebSocket event handling hooks.
 

@@ -279,6 +279,15 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/skills") {
+    await ensureAppServerStarted();
+    const cwd = url.searchParams.get("cwd");
+    const skills = await rpc.request("skills/list", { cwds: cwd ? [cwd] : [], forceReload: false })
+      .catch((error) => ({ error: cleanCommandOutput(error.message || error), data: [] }));
+    sendJson(res, 200, { data: flattenSkills(summarizeSkills(skills)) });
+    return;
+  }
+
   const threadMatch = url.pathname.match(/^\/api\/threads\/([^/]+)$/);
   if (req.method === "GET" && threadMatch) {
     await ensureAppServerStarted();
@@ -913,6 +922,25 @@ function summarizeSkills(skills) {
       })),
     })),
   };
+}
+
+function flattenSkills(skills) {
+  const seen = new Set();
+  const entries = [];
+  for (const entry of skills?.data || []) {
+    for (const skill of entry.skills || []) {
+      const name = skill.name || skill.metadata?.name;
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      entries.push({
+        name,
+        description: skill.description || skill.metadata?.description || null,
+        source: skill.source || skill.metadata?.source || null,
+        enabled: skill.enabled ?? skill.metadata?.enabled ?? null,
+      });
+    }
+  }
+  return entries.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function summarizeApps(apps) {
