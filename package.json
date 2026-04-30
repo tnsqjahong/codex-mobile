@@ -8,7 +8,8 @@
   },
   "scripts": {
     "cli": "node bin/codex-mobile.js",
-    "start": "node src/bridge/server.js",
+    "start": "node bin/codex-mobile.js",
+    "serve": "node src/bridge/server.js",
     "doctor": "node src/bridge/doctor.js",
     "setup": "npm run doctor",
     "probe": "node src/bridge/probe.js"

@@ -18,14 +18,14 @@ Then start the local companion:
 npm start
 ```
 
-Or use the desktop-style launcher command:
+`npm start` starts the bridge on the LAN, opens the desktop pairing window, checks Codex CLI/login status there, and lets the user show the QR.
+
+Later, when installed globally, the same launcher is available as:
 
 ```sh
 npm link
 codex-mobile
 ```
-
-`codex-mobile` starts the bridge on the LAN, opens the desktop pairing window, checks Codex CLI/login status there, and lets the user show the QR.
 
 Development URL:
 
@@ -36,7 +36,7 @@ http://127.0.0.1:8787
 LAN phone pairing:
 
 ```sh
-HOST=0.0.0.0 npm start
+npm start
 ```
 
 If the advertised LAN URL is not what the phone can reach, set it explicitly:
