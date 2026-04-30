@@ -193,6 +193,167 @@ select {
   display: block;
 }
 
+.app-workspace {
+  min-height: 100svh;
+  background: var(--bg);
+}
+
+.main-pane {
+  min-width: 0;
+  height: 100svh;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  min-height: 58px;
+  padding: calc(env(safe-area-inset-top) + 10px) 14px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(21, 21, 19, 0.92);
+  backdrop-filter: blur(18px);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 10;
+  width: min(84vw, 330px);
+  transform: translateX(-102%);
+  transition: transform 160ms ease;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 10px;
+  padding: calc(env(safe-area-inset-top) + 12px) 12px calc(env(safe-area-inset-bottom) + 12px);
+  background: #20201c;
+  border-right: 1px solid var(--line);
+  box-shadow: 18px 0 48px var(--shadow);
+}
+
+.sidebar-visible .app-sidebar {
+  transform: translateX(0);
+}
+
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+  background: rgba(0, 0, 0, 0.52);
+}
+
+.sidebar-header,
+.sidebar-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-header {
+  min-height: 40px;
+  justify-content: space-between;
+}
+
+.sidebar-header strong,
+.sidebar-header span,
+.project-picker span {
+  display: block;
+}
+
+.sidebar-header span,
+.project-picker span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.project-picker {
+  display: grid;
+  gap: 6px;
+}
+
+.project-picker select,
+.sidebar-tools input {
+  min-height: 40px;
+  border-radius: 10px;
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+.sidebar-tools input {
+  flex: 1;
+  min-width: 0;
+}
+
+.thread-list {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding-right: 2px;
+}
+
+.thread-item {
+  width: 100%;
+  min-height: 58px;
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 11px;
+  border-radius: 10px;
+  background: transparent;
+}
+
+.thread-item.active {
+  background: #2b2b25;
+}
+
+.thread-item strong,
+.thread-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-item strong {
+  font-size: 14px;
+}
+
+.thread-item span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workspace-empty {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.workspace-empty strong {
+  font-size: 18px;
+}
+
+.workspace-empty span {
+  max-width: min(520px, calc(100vw - 36px));
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.compact-empty {
+  padding: 16px 8px;
+  font-size: 13px;
+}
+
 .pair-code-label {
   width: max-content;
   max-width: 100%;
@@ -249,6 +410,7 @@ select {
 }
 
 .main-scroll {
+  min-height: 0;
   overflow: auto;
   padding: 12px 14px 110px;
 }
@@ -754,16 +916,63 @@ select {
     border-right: 1px solid var(--line);
   }
 
-  .composer {
+  .workspace .composer {
     left: 50%;
     width: min(720px, 100vw);
     transform: translateX(-50%);
   }
 
-  .skill-picker {
+  .workspace .skill-picker {
     left: 50%;
     right: auto;
     width: min(696px, calc(100vw - 24px));
     transform: translateX(-50%);
+  }
+}
+
+@media (min-width: 900px) {
+  .app-workspace {
+    display: grid;
+    grid-template-columns: 320px minmax(0, 1fr);
+  }
+
+  .app-sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    width: 320px;
+    height: 100svh;
+    transform: none;
+    box-shadow: none;
+  }
+
+  .sidebar-backdrop,
+  .sidebar-header [data-close-sidebar] {
+    display: none;
+  }
+
+  .main-pane {
+    grid-column: 2;
+  }
+
+  .app-workspace .composer {
+    left: 320px;
+    right: 0;
+    width: auto;
+    transform: none;
+  }
+
+  .app-workspace .skill-picker {
+    left: 332px;
+    right: 12px;
+    width: auto;
+    transform: none;
+  }
+
+  .app-workspace .main-scroll,
+  .app-workspace .thread-context,
+  .app-workspace .thread-tabs {
+    padding-left: 18px;
+    padding-right: 18px;
   }
 }

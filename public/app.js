@@ -2,6 +2,7 @@ const state = {
   token: localStorage.getItem("codexMobileToken"),
   projects: [],
   threads: [],
+  projectsLoading: false,
   selectedProject: null,
   selectedThread: null,
   thread: null,
@@ -23,6 +24,8 @@ const state = {
   loginPoll: null,
   desktopReady: false,
   installPrompt: null,
+  sidebarOpen: window.matchMedia("(min-width: 900px)").matches,
+  threadsLoading: false,
 };
 
 const app = document.querySelector("#app");
@@ -51,9 +54,7 @@ async function init() {
 
 function renderCurrentView() {
   if (!state.token) return;
-  if (state.thread) return renderThread();
-  if (state.selectedProject) return renderThreads();
-  renderProjects();
+  renderWorkspace();
 }
 
 function bindPairing() {
@@ -185,6 +186,7 @@ async function completePair(code) {
     });
     state.token = result.accessToken;
     localStorage.setItem("codexMobileToken", state.token);
+    renderWorkspace();
     await loadProjects();
   } catch (error) {
     if (stage) stage.textContent = error.message;
@@ -192,10 +194,25 @@ async function completePair(code) {
 }
 
 async function loadProjects() {
-  const result = await fetchJson("/api/projects");
-  state.projects = result.projects || [];
-  renderProjects();
-  connectEvents();
+  state.projectsLoading = true;
+  renderWorkspace();
+  try {
+    const result = await fetchJson("/api/projects");
+    state.projects = result.projects || [];
+    state.projectsLoading = false;
+    connectEvents();
+    if (!state.selectedProject && state.projects.length) {
+      state.selectedProject = state.projects[0];
+      renderWorkspace();
+      await loadThreads(state.selectedProject, { selectFirst: true });
+      return;
+    }
+    renderWorkspace();
+  } catch (error) {
+    state.projectsLoading = false;
+    renderWorkspace();
+    throw error;
+  }
 }
 
 async function createThread(cwd, text = "") {
@@ -213,13 +230,20 @@ async function createThread(cwd, text = "") {
   else await loadProjects();
 }
 
-async function loadThreads(project) {
+async function loadThreads(project, options = {}) {
   state.selectedProject = project;
+  state.threadsLoading = true;
+  state.threads = [];
+  renderWorkspace();
   const query = new URLSearchParams({ cwd: project.cwd, limit: "100" });
-  if (state.threadSearch) query.set("search", state.threadSearch);
   const result = await fetchJson(`/api/threads?${query.toString()}`);
   state.threads = result.data || [];
-  renderThreads();
+  state.threadsLoading = false;
+  if (options.selectFirst && !state.thread && state.threads[0]) {
+    await loadThread(state.threads[0].id);
+    return;
+  }
+  renderWorkspace();
 }
 
 async function loadThread(threadId) {
@@ -234,10 +258,19 @@ async function loadThread(threadId) {
   ]);
   state.thread = result.thread;
   state.selectedThread = state.thread;
-  await Promise.all([loadThreadContext(threadId), loadChanges(threadId), loadBranches(threadId), loadTokenUsage(threadId), loadSkills(state.thread.cwd)]);
   state.approvals.clear();
+  if (!isWideScreen()) state.sidebarOpen = false;
   renderThread();
   subscribeThread(threadId);
+  Promise.allSettled([
+    loadThreadContext(threadId),
+    loadBranches(threadId),
+    loadTokenUsage(threadId),
+    loadSkills(state.thread.cwd),
+    state.activeTab === "changes" ? loadChanges(threadId) : Promise.resolve(),
+  ]).then(() => {
+    if (state.thread?.id === threadId) renderThread();
+  });
 }
 
 async function loadModels() {
@@ -476,84 +509,174 @@ function applyCodexEvent(event) {
 }
 
 function renderProjects() {
-  const projects = state.projectSearch
-    ? state.projects.filter((project) => `${project.name} ${project.cwd}`.toLowerCase().includes(state.projectSearch.toLowerCase()))
-    : state.projects;
-  app.innerHTML = shell("Projects", "Local Codex workspaces", `
-    <div class="toolbar">
-      <input id="project-search" value="${escapeAttr(state.projectSearch)}" placeholder="Search projects" />
-      <button class="ghost-button compact" data-new-thread type="button">New</button>
-    </div>
-    <div class="main-scroll">
-      ${projects.map((project) => `
-        <button class="project-row" data-cwd="${escapeAttr(project.cwd)}">
-          <span class="project-icon">${folderIcon()}</span>
-          <span class="row-main">
-            <strong>${escapeHtml(project.name)}</strong>
-            <span>${escapeHtml(project.cwd)}</span>
-          </span>
-          <span class="row-meta">${project.threadCount}</span>
-        </button>
-      `).join("") || `<p class="empty-state">No Codex projects found.</p>`}
-    </div>
-  `);
-  app.querySelectorAll(".project-row").forEach((row) => {
-    row.addEventListener("click", () => loadThreads(state.projects.find((project) => project.cwd === row.dataset.cwd)));
-  });
-  app.querySelector("#project-search")?.addEventListener("input", (event) => {
-    state.projectSearch = event.target.value;
-    renderProjects();
-  });
-  app.querySelector("[data-new-thread]")?.addEventListener("click", () => {
-    const cwd = prompt("Working directory", state.selectedProject?.cwd || "");
-    if (!cwd) return;
-    const text = prompt("First message", "");
-    createThread(cwd, text || "").catch((error) => alert(error.message));
-  });
+  renderWorkspace();
 }
 
 function renderThreads() {
-  app.innerHTML = shell(state.selectedProject.name, state.selectedProject.cwd, `
-    <div class="toolbar">
-      <input id="thread-search" value="${escapeAttr(state.threadSearch)}" placeholder="Search threads" />
-      <button class="ghost-button compact" data-new-thread type="button">New</button>
-    </div>
-    <div class="main-scroll">
-      ${state.threads.map((thread) => `
-        <button class="thread-row" data-thread-id="${thread.id}">
-          <span class="row-main">
-            <strong>${escapeHtml(thread.name || thread.title || thread.preview || "Untitled")}</strong>
-            <span>${formatDate(thread.updatedAt || thread.createdAt)}</span>
-          </span>
-          <span class="row-meta">${escapeHtml(formatThreadStatus(thread.status))}</span>
-        </button>
-      `).join("") || `<p class="empty-state">No threads in this project.</p>`}
-    </div>
-  `, { back: renderProjects });
-  app.querySelectorAll(".thread-row").forEach((row) => {
-    row.addEventListener("click", () => loadThread(row.dataset.threadId));
-  });
-  app.querySelector("#thread-search")?.addEventListener("change", (event) => {
-    state.threadSearch = event.target.value;
-    loadThreads(state.selectedProject);
-  });
-  app.querySelector("[data-new-thread]")?.addEventListener("click", () => {
-    const text = prompt("First message", "");
-    createThread(state.selectedProject.cwd, text || "").catch((error) => alert(error.message));
-  });
+  renderWorkspace();
 }
 
 function renderThread() {
+  renderWorkspace();
+}
+
+function renderWorkspace() {
   const thread = state.thread;
-  const turns = thread?.turns || [];
+  const project = state.selectedProject;
+  const title = thread?.name || thread?.preview || (project ? "New chat" : "Codex Mobile");
+  const subtitle = project?.name || thread?.cwd || "Local Codex";
+  const canShowInstall = state.installPrompt || isIosSafari();
+  app.innerHTML = `
+    <section class="app-workspace ${state.sidebarOpen ? "sidebar-visible" : ""}">
+      ${state.sidebarOpen ? `<button class="sidebar-backdrop" data-close-sidebar aria-label="Close sidebar"></button>` : ""}
+      ${renderSidebar()}
+      <main class="main-pane">
+        <header class="app-header">
+          <button class="icon-button" data-toggle-sidebar aria-label="Chats">☰</button>
+          <div class="topbar-title">
+            <strong>${escapeHtml(title)}</strong>
+            <span>${escapeHtml(subtitle)}</span>
+          </div>
+          ${canShowInstall ? `<button class="icon-button" data-install aria-label="Install">⌂</button>` : ""}
+          <button class="icon-button" data-settings aria-label="Settings">⚙</button>
+          <button class="icon-button" data-disconnect aria-label="Disconnect">×</button>
+        </header>
+        ${renderMainPane()}
+      </main>
+    </section>
+  `;
+  bindWorkspaceControls();
+}
+
+function renderSidebar() {
+  return `
+    <aside class="app-sidebar" aria-label="Chats">
+      <div class="sidebar-header">
+        <div>
+          <strong>Codex</strong>
+          <span>${state.projects.length} projects</span>
+        </div>
+        <button class="icon-button" data-close-sidebar aria-label="Close sidebar">×</button>
+      </div>
+      <label class="project-picker">
+        <span>Project</span>
+        <select id="project-select" aria-label="Project" ${state.projectsLoading ? "disabled" : ""}>
+          ${state.projects.map((project) => `<option value="${escapeAttr(project.cwd)}" ${project.cwd === state.selectedProject?.cwd ? "selected" : ""}>${escapeHtml(project.name)}</option>`).join("")}
+        </select>
+      </label>
+      <div class="sidebar-tools">
+        <input id="thread-search" value="${escapeAttr(state.threadSearch)}" placeholder="Search chats" />
+        <button class="ghost-button compact" data-new-thread type="button">New</button>
+      </div>
+      <div class="thread-list">
+        ${renderThreadList()}
+      </div>
+    </aside>
+  `;
+}
+
+function renderThreadList() {
+  const threads = filteredThreads();
+  return `
+    ${state.projectsLoading ? `<p class="empty-state compact-empty">Loading projects...</p>` : ""}
+    ${state.threadsLoading ? `<p class="empty-state compact-empty">Loading chats...</p>` : ""}
+    ${!state.projectsLoading && !state.threadsLoading && threads.map(renderThreadListItem).join("")}
+    ${!state.projectsLoading && !state.threadsLoading && !threads.length ? `<p class="empty-state compact-empty">${state.threadSearch ? "No matching chats." : "No chats in this project."}</p>` : ""}
+  `;
+}
+
+function renderThreadListItem(thread) {
+  const active = thread.id === state.thread?.id;
+  return `
+    <button class="thread-item ${active ? "active" : ""}" data-thread-id="${escapeAttr(thread.id)}" type="button">
+      <strong>${escapeHtml(thread.name || thread.title || thread.preview || "Untitled")}</strong>
+      <span>${escapeHtml(formatThreadStatus(thread.status) || formatDate(thread.updatedAt || thread.createdAt))}</span>
+    </button>
+  `;
+}
+
+function renderMainPane() {
+  if (state.projectsLoading) {
+    return `<div class="main-scroll workspace-empty"><p class="empty-state">Loading Codex workspace...</p></div>`;
+  }
+  if (!state.selectedProject) {
+    return `<div class="main-scroll workspace-empty"><p class="empty-state">No Codex projects found.</p></div>`;
+  }
+  if (!state.thread) {
+    return `
+      <div class="main-scroll workspace-empty">
+        <strong>${escapeHtml(state.selectedProject.name)}</strong>
+        <span>${escapeHtml(state.selectedProject.cwd)}</span>
+        <button class="primary-button big" data-new-thread type="button">New chat</button>
+      </div>
+    `;
+  }
+  const turns = state.thread.turns || [];
   const content = state.activeTab === "changes" ? renderChanges() : renderChat(turns);
-  app.innerHTML = shell(thread.name || thread.preview || "Thread", thread.cwd, `
+  return `
     ${renderThreadContext()}
     ${renderThreadTabs()}
     ${content}
     ${state.activeTab === "chat" ? renderComposer() : ""}
-  `, { back: () => loadThreads(state.selectedProject) });
-  bindThreadControls();
+  `;
+}
+
+function filteredThreads() {
+  const query = state.threadSearch.trim().toLowerCase();
+  if (!query) return state.threads;
+  return state.threads.filter((thread) => {
+    const haystack = `${thread.name || ""} ${thread.title || ""} ${thread.preview || ""} ${formatThreadStatus(thread.status)}`.toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function bindWorkspaceControls() {
+  app.querySelector("[data-toggle-sidebar]")?.addEventListener("click", () => {
+    state.sidebarOpen = !state.sidebarOpen;
+    renderWorkspace();
+  });
+  app.querySelectorAll("[data-close-sidebar]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.sidebarOpen = false;
+      renderWorkspace();
+    });
+  });
+  app.querySelector("#project-select")?.addEventListener("change", (event) => {
+    const project = state.projects.find((candidate) => candidate.cwd === event.target.value);
+    if (!project) return;
+    state.thread = null;
+    state.selectedThread = null;
+    state.threadSearch = "";
+    state.activeTab = "chat";
+    loadThreads(project, { selectFirst: true }).catch((error) => alert(error.message));
+  });
+  app.querySelector("#thread-search")?.addEventListener("input", (event) => {
+    state.threadSearch = event.target.value;
+    const list = app.querySelector(".thread-list");
+    if (list) list.innerHTML = renderThreadList();
+    bindThreadRows();
+  });
+  bindThreadRows();
+  app.querySelectorAll("[data-new-thread]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!state.selectedProject) return;
+      const text = prompt("First message", "");
+      createThread(state.selectedProject.cwd, text || "").catch((error) => alert(error.message));
+    });
+  });
+  app.querySelector("[data-disconnect]")?.addEventListener("click", () => {
+    localStorage.removeItem("codexMobileToken");
+    location.reload();
+  });
+  app.querySelector("[data-settings]")?.addEventListener("click", () => loadSettings().catch((error) => alert(error.message)));
+  app.querySelector("[data-install]")?.addEventListener("click", () => installApp().catch((error) => alert(error.message)));
+  if (state.thread) bindThreadControls();
+}
+
+function bindThreadRows() {
+  app.querySelectorAll("[data-thread-id]").forEach((row) => {
+    row.addEventListener("click", () => loadThread(row.dataset.threadId).catch((error) => alert(error.message)));
+  });
 }
 
 function renderChat(turns) {
@@ -593,8 +716,12 @@ function bindThreadControls() {
     });
   });
   app.querySelectorAll("[data-tab]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       state.activeTab = button.dataset.tab;
+      if (state.activeTab === "changes" && !state.changes && state.thread) {
+        renderThread();
+        await loadChanges(state.thread.id).catch((error) => alert(error.message));
+      }
       renderThread();
     });
   });
@@ -934,7 +1061,7 @@ function renderSettings() {
       ${renderCollection("MCP Servers", mcpServers.length, mcpServers.map((item) => item.name || item.id || item.serverName))}
       ${renderCollection("Automations", automations.length, automations.map((item) => `${item.name}${item.status ? ` · ${item.status}` : ""}`))}
     </div>
-  `, { back: state.thread ? renderThread : state.selectedProject ? () => loadThreads(state.selectedProject) : renderProjects });
+  `, { back: renderWorkspace });
 }
 
 function collectPlugins(plugins) {
@@ -994,6 +1121,10 @@ function shell(title, subtitle, content, options = {}) {
       ${content}
     </section>
   `;
+}
+
+function isWideScreen() {
+  return window.matchMedia("(min-width: 900px)").matches;
 }
 
 function isIosSafari() {

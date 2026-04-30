@@ -24,6 +24,8 @@ const sessions = new Map();
 const activeTurns = new Map();
 const diffSnapshots = new Map();
 const tokenUsageSnapshots = new Map();
+const responseCache = new Map();
+const CACHE_TTL_MS = 120_000;
 let publicBaseUrlOverride = process.env.PUBLIC_URL?.replace(/\/$/, "") || null;
 let loginProcess = null;
 let loginFlow = {
@@ -167,6 +169,9 @@ async function handleApi(req, res, url) {
       });
       return;
     }
+    ensureAppServerStarted().catch((error) => {
+      console.warn(`Failed to prewarm Codex app-server: ${error.message || error}`);
+    });
     const code = crypto.randomBytes(4).toString("hex").toUpperCase();
     const expiresAt = Date.now() + 60_000;
     const qrUrl = `${getPublicBaseUrl()}/?pair=${code}`;
@@ -202,13 +207,18 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/projects") {
     await ensureAppServerStarted();
-    const threads = await listThreads({ limit: Number(url.searchParams.get("limit") || 100) });
-    sendJson(res, 200, { projects: groupProjects(threads) });
+    const limit = Number(url.searchParams.get("limit") || 100);
+    const projects = await cachedResponse(`projects:${limit}`, async () => {
+      const threads = await listThreads({ limit });
+      return groupProjects(threads);
+    });
+    sendJson(res, 200, { projects });
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/threads") {
     await ensureAppServerStarted();
+    invalidateResponseCache();
     const body = await readJson(req);
     const threadParams = {
       cwd: body.cwd || null,
@@ -236,7 +246,7 @@ async function handleApi(req, res, url) {
     const searchTerm = url.searchParams.get("search");
     const cursor = url.searchParams.get("cursor");
     const limit = Number(url.searchParams.get("limit") || 50);
-    const result = await rpc.request("thread/list", {
+    const result = await cachedResponse(`threads:${cwd || ""}:${cursor || ""}:${limit}:${searchTerm || ""}`, () => rpc.request("thread/list", {
       archived: false,
       cursor,
       limit,
@@ -244,7 +254,7 @@ async function handleApi(req, res, url) {
       sortKey: "updated_at",
       sortDirection: "desc",
       cwd: cwd || null,
-    });
+    }));
     sendJson(res, 200, result);
     return;
   }
@@ -316,6 +326,7 @@ async function handleApi(req, res, url) {
   const threadActionMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/actions$/);
   if (req.method === "POST" && threadActionMatch) {
     await ensureAppServerStarted();
+    invalidateResponseCache();
     const threadId = decodeURIComponent(threadActionMatch[1]);
     const body = await readJson(req);
     const result = await handleThreadAction(threadId, body);
@@ -398,6 +409,7 @@ async function handleApi(req, res, url) {
   const messageMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages$/);
   if (req.method === "POST" && messageMatch) {
     await ensureAppServerStarted();
+    invalidateResponseCache();
     const threadId = decodeURIComponent(messageMatch[1]);
     const body = await readJson(req);
     if (!body.text?.trim()) {
@@ -618,6 +630,18 @@ function cleanCommandOutput(output) {
     .map((line) => line.trim())
     .filter((line) => line && !line.includes("could not update PATH"))
     .join("\n");
+}
+
+async function cachedResponse(key, load) {
+  const cached = responseCache.get(key);
+  if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return cached.value;
+  const value = await load();
+  responseCache.set(key, { value, createdAt: Date.now() });
+  return value;
+}
+
+function invalidateResponseCache() {
+  responseCache.clear();
 }
 
 async function listThreads({ limit }) {

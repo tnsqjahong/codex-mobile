@@ -2,7 +2,9 @@
   "name": "Codex Mobile Companion",
   "short_name": "Codex Mobile",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "background_color": "#151513",
   "theme_color": "#151513",
   "icons": [
