@@ -222,14 +222,14 @@ function drawFormatBits(modules, reserved, mask) {
   const bits = getFormatBits(mask);
   for (let index = 0; index < 15; index += 1) {
     const bit = ((bits >>> index) & 1) === 1;
-    if (index < 6) setFunction(modules, reserved, 8, index, bit);
-    else if (index === 6) setFunction(modules, reserved, 8, 7, bit);
+    if (index < 6) setFunction(modules, reserved, index, 8, bit);
+    else if (index === 6) setFunction(modules, reserved, 7, 8, bit);
     else if (index === 7) setFunction(modules, reserved, 8, 8, bit);
-    else if (index === 8) setFunction(modules, reserved, 7, 8, bit);
-    else setFunction(modules, reserved, 14 - index, 8, bit);
+    else if (index === 8) setFunction(modules, reserved, 8, 7, bit);
+    else setFunction(modules, reserved, 8, 14 - index, bit);
 
-    if (index < 8) setFunction(modules, reserved, size - 1 - index, 8, bit);
-    else setFunction(modules, reserved, 8, size - 15 + index, bit);
+    if (index < 8) setFunction(modules, reserved, 8, size - 1 - index, bit);
+    else setFunction(modules, reserved, size - 15 + index, 8, bit);
   }
 }
 
