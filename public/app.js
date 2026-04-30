@@ -24,6 +24,10 @@ const state = {
   loginPoll: null,
   desktopReady: false,
   installPrompt: null,
+  installSkipped: sessionStorage.getItem("codexMobileInstallSkipped") === "true",
+  notificationPrompted: localStorage.getItem("codexMobileNotifications") === "enabled",
+  notificationsEnabled: "Notification" in window && Notification.permission === "granted" && localStorage.getItem("codexMobileNotifications") === "enabled",
+  swRegistration: null,
   sidebarOpen: window.matchMedia("(min-width: 900px)").matches,
   threadsLoading: false,
 };
@@ -33,7 +37,9 @@ const app = document.querySelector("#app");
 init();
 
 async function init() {
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+  if ("serviceWorker" in navigator) {
+    state.swRegistration = await navigator.serviceWorker.register("/sw.js").catch(() => null);
+  }
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     state.installPrompt = event;
@@ -55,6 +61,10 @@ async function init() {
 function renderCurrentView() {
   if (!state.token) return;
   renderWorkspace();
+}
+
+function shouldShowInstallGate() {
+  return Boolean(state.token && isMobileBrowser() && !isStandalone() && !state.installSkipped);
 }
 
 function bindPairing() {
@@ -391,11 +401,64 @@ async function installApp() {
     const promptEvent = state.installPrompt;
     state.installPrompt = null;
     promptEvent.prompt();
-    await promptEvent.userChoice.catch(() => null);
+    const choice = await promptEvent.userChoice.catch(() => null);
+    if (choice?.outcome === "accepted") {
+      state.installSkipped = true;
+      sessionStorage.setItem("codexMobileInstallSkipped", "true");
+    }
     renderCurrentView();
     return;
   }
-  alert("iPhone에서는 Safari 공유 버튼을 누른 뒤 '홈 화면에 추가'를 선택하세요.");
+  if (isIosSafari()) {
+    app.querySelector("[data-ios-install-help]")?.removeAttribute("hidden");
+    return;
+  }
+  alert("브라우저 메뉴에서 앱 설치 또는 홈 화면에 추가를 선택하세요.");
+}
+
+async function enableNotifications() {
+  if (!("Notification" in window)) {
+    alert("이 브라우저는 알림을 지원하지 않습니다.");
+    return;
+  }
+  const permission = await Notification.requestPermission();
+  state.notificationPrompted = true;
+  if (permission === "granted") {
+    state.notificationsEnabled = true;
+    localStorage.setItem("codexMobileNotifications", "enabled");
+    await notify("Codex Mobile", "알림이 켜졌습니다.", "codex-notifications-ready");
+  } else {
+    state.notificationsEnabled = false;
+    localStorage.removeItem("codexMobileNotifications");
+  }
+  renderCurrentView();
+}
+
+async function notify(title, body, tag) {
+  if (!state.notificationsEnabled || !("Notification" in window) || Notification.permission !== "granted") return;
+  const registration = state.swRegistration || (navigator.serviceWorker ? await navigator.serviceWorker.ready.catch(() => null) : null);
+  const options = {
+    body,
+    tag,
+    badge: "/icon.svg",
+    icon: "/icon.svg",
+    data: { url: location.href },
+  };
+  if (registration?.showNotification) {
+    await registration.showNotification(title, options).catch(() => {});
+    return;
+  }
+  new Notification(title, options);
+}
+
+function notifyApproval(message) {
+  const detail = summarizeApproval(message);
+  notify("Codex needs approval", detail.detail || detail.title, `approval-${message.requestId}`);
+}
+
+function notifyTurnCompleted(event) {
+  const title = state.thread?.name || state.thread?.preview || "Codex response finished";
+  notify("Codex finished", title, `turn-${event.params?.turnId || Date.now()}`);
 }
 
 async function answerApproval(requestId, decision, remember = false) {
@@ -415,6 +478,7 @@ function connectEvents() {
     const message = JSON.parse(event.data);
     if (message.type === "approvalRequested") {
       state.approvals.set(message.requestId, message);
+      notifyApproval(message);
       renderThread();
       return;
     }
@@ -466,6 +530,7 @@ function applyCodexEvent(event) {
   if (event.method === "turn/completed") {
     const turn = turns.find((candidate) => candidate.id === event.params.turnId);
     if (turn) turn.status = event.params.turn?.status || "completed";
+    notifyTurnCompleted(event);
     loadChanges(state.thread.id).then(renderThread).catch(() => {});
   }
 
@@ -521,11 +586,16 @@ function renderThread() {
 }
 
 function renderWorkspace() {
+  if (shouldShowInstallGate()) {
+    renderInstallGate();
+    return;
+  }
   const thread = state.thread;
   const project = state.selectedProject;
   const title = thread?.name || thread?.preview || (project ? "New chat" : "Codex Mobile");
   const subtitle = project?.name || thread?.cwd || "Local Codex";
   const canShowInstall = state.installPrompt || isIosSafari();
+  const canShowNotifications = "Notification" in window && !state.notificationsEnabled;
   app.innerHTML = `
     <section class="app-workspace ${state.sidebarOpen ? "sidebar-visible" : ""}">
       ${state.sidebarOpen ? `<button class="sidebar-backdrop" data-close-sidebar aria-label="Close sidebar"></button>` : ""}
@@ -538,6 +608,7 @@ function renderWorkspace() {
             <span>${escapeHtml(subtitle)}</span>
           </div>
           ${canShowInstall ? `<button class="icon-button" data-install aria-label="Install">⌂</button>` : ""}
+          ${canShowNotifications ? `<button class="icon-button" data-enable-notifications aria-label="Enable notifications">◦</button>` : ""}
           <button class="icon-button" data-settings aria-label="Settings">⚙</button>
           <button class="icon-button" data-disconnect aria-label="Disconnect">×</button>
         </header>
@@ -546,6 +617,38 @@ function renderWorkspace() {
     </section>
   `;
   bindWorkspaceControls();
+}
+
+function renderInstallGate() {
+  const ios = isIosSafari();
+  app.innerHTML = `
+    <section class="install-view">
+      <div class="brand-row">
+        <span class="brand-mark"></span>
+        <span>Codex Mobile</span>
+      </div>
+      <button class="primary-button big" data-install type="button">앱 설치</button>
+      ${ios ? `
+        <div class="install-help" data-ios-install-help hidden>
+          <strong>iPhone 설치</strong>
+          <span>Safari 공유 버튼 → 홈 화면에 추가</span>
+        </div>
+      ` : ""}
+      ${"Notification" in window ? `<button class="ghost-button" data-enable-notifications type="button">알림 켜기</button>` : ""}
+      <button class="text-button" data-skip-install type="button">브라우저에서 계속</button>
+    </section>
+  `;
+  bindInstallGate();
+}
+
+function bindInstallGate() {
+  app.querySelector("[data-install]")?.addEventListener("click", () => installApp().catch((error) => alert(error.message)));
+  app.querySelector("[data-enable-notifications]")?.addEventListener("click", () => enableNotifications().catch((error) => alert(error.message)));
+  app.querySelector("[data-skip-install]")?.addEventListener("click", () => {
+    state.installSkipped = true;
+    sessionStorage.setItem("codexMobileInstallSkipped", "true");
+    renderWorkspace();
+  });
 }
 
 function renderSidebar() {
@@ -670,6 +773,7 @@ function bindWorkspaceControls() {
   });
   app.querySelector("[data-settings]")?.addEventListener("click", () => loadSettings().catch((error) => alert(error.message)));
   app.querySelector("[data-install]")?.addEventListener("click", () => installApp().catch((error) => alert(error.message)));
+  app.querySelector("[data-enable-notifications]")?.addEventListener("click", () => enableNotifications().catch((error) => alert(error.message)));
   if (state.thread) bindThreadControls();
 }
 
@@ -1127,9 +1231,16 @@ function isWideScreen() {
   return window.matchMedia("(min-width: 900px)").matches;
 }
 
+function isStandalone() {
+  return window.navigator.standalone === true || window.matchMedia("(display-mode: standalone)").matches;
+}
+
+function isMobileBrowser() {
+  return /android|iphone|ipad|ipod/i.test(navigator.userAgent);
+}
+
 function isIosSafari() {
-  const standalone = window.navigator.standalone === true || window.matchMedia("(display-mode: standalone)").matches;
-  return !standalone && /iphone|ipad|ipod/i.test(navigator.userAgent);
+  return !isStandalone() && /iphone|ipad|ipod/i.test(navigator.userAgent);
 }
 
 async function fetchJson(url, options = {}) {

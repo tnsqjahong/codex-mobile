@@ -58,6 +58,16 @@ button:disabled {
   padding: 32px 22px;
 }
 
+.install-view {
+  min-height: 100svh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 18px;
+  padding: 32px 22px;
+  text-align: center;
+}
+
 .brand-row,
 .topbar,
 .project-row,
@@ -159,6 +169,35 @@ select {
 
 .ghost-button {
   align-self: flex-start;
+}
+
+.install-view .ghost-button {
+  align-self: center;
+}
+
+.text-button {
+  background: transparent;
+  color: var(--muted);
+  padding: 10px 12px;
+}
+
+.install-help {
+  display: grid;
+  gap: 4px;
+  max-width: min(320px, calc(100vw - 44px));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 12px 14px;
+}
+
+.install-help[hidden] {
+  display: none;
+}
+
+.install-help span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .muted {

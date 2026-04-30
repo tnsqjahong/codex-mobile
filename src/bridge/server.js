@@ -169,8 +169,8 @@ async function handleApi(req, res, url) {
       });
       return;
     }
-    ensureAppServerStarted().catch((error) => {
-      console.warn(`Failed to prewarm Codex app-server: ${error.message || error}`);
+    prewarmProjectCache().catch((error) => {
+      console.warn(`Failed to prewarm Codex projects: ${error.message || error}`);
     });
     const code = crypto.randomBytes(4).toString("hex").toUpperCase();
     const expiresAt = Date.now() + 60_000;
@@ -642,6 +642,14 @@ async function cachedResponse(key, load) {
 
 function invalidateResponseCache() {
   responseCache.clear();
+}
+
+async function prewarmProjectCache() {
+  await ensureAppServerStarted();
+  await cachedResponse("projects:100", async () => {
+    const threads = await listThreads({ limit: 100 });
+    return groupProjects(threads);
+  });
 }
 
 async function listThreads({ limit }) {
