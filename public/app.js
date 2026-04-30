@@ -38,7 +38,6 @@ async function init() {
   });
   const pair = new URL(location.href).searchParams.get("pair");
   if (pair && !state.token) {
-    document.querySelector("#pair-code").value = pair;
     await completePair(pair);
     history.replaceState({}, "", "/");
   }
@@ -58,55 +57,40 @@ function renderCurrentView() {
 }
 
 function bindPairing() {
-  document.querySelector("#desktop-status")?.addEventListener("click", async (event) => {
+  document.querySelector(".pairing-view")?.addEventListener("click", async (event) => {
     if (event.target.closest("[data-recheck]")) await loadDesktopStatus();
     if (event.target.closest("[data-start-login]")) await startDesktopLogin();
     if (event.target.closest("[data-cancel-login]")) await cancelDesktopLogin();
-  });
-
-  document.querySelector("#pair-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await completePair(document.querySelector("#pair-code").value.trim());
-  });
-
-  document.querySelector("#start-pair").addEventListener("click", async () => {
-    const help = document.querySelector("#pair-help");
-    try {
-      const result = await fetchJson("/api/pair/start", { method: "POST", auth: false });
-      renderPairingCode(result);
-    } catch (error) {
-      if (help) help.textContent = error.message;
-      await loadDesktopStatus();
-    }
   });
 }
 
 async function loadDesktopStatus() {
   const container = document.querySelector("#desktop-status");
   if (!container) return;
-  container.innerHTML = `<div class="status-row"><span class="status-dot pending"></span><span>Checking desktop Codex setup</span></div>`;
+  container.innerHTML = `<span class="pairing-minor">Checking...</span>`;
   try {
     const status = await fetchJson("/api/desktop/status", { auth: false });
     state.desktopReady = Boolean(status.ok);
     container.innerHTML = renderDesktopStatus(status);
-    updatePairControls();
+    if (state.desktopReady) await showPairingQr();
+    else {
+      const stage = document.querySelector("#qr-stage");
+      if (stage) stage.innerHTML = "";
+    }
   } catch (error) {
     state.desktopReady = false;
-    updatePairControls();
     container.innerHTML = `
-      <div class="status-row"><span class="status-dot bad"></span><span>Desktop status unavailable</span></div>
-      <p class="status-detail">${escapeHtml(error.message)}</p>
-      <button class="ghost-button" data-recheck type="button">Recheck</button>
+      <button class="primary-button big" data-recheck type="button">다시 시도</button>
+      <span class="pairing-minor">${escapeHtml(error.message)}</span>
     `;
   }
 }
 
 async function startDesktopLogin() {
   state.desktopReady = false;
-  updatePairControls();
   const container = document.querySelector("#desktop-status");
   if (container) {
-    container.innerHTML = `<div class="status-row"><span class="status-dot pending"></span><span>Starting OpenAI login</span></div>`;
+    container.innerHTML = `<span class="pairing-minor">로그인 중...</span>`;
   }
   const flow = await fetchJson("/api/desktop/login/start", { method: "POST", auth: false });
   renderLoginFlow(flow);
@@ -143,72 +127,56 @@ function renderLoginFlow(flow) {
   if (!container) return;
   const running = flow.running || flow.status === "running";
   container.innerHTML = `
-    <div class="status-row">
-      <span class="status-dot ${running ? "pending" : flow.status === "completed" || flow.status === "already_logged_in" ? "ok" : "bad"}"></span>
-      <span>${escapeHtml(formatLoginStatus(flow.status))}</span>
-    </div>
-    ${flow.output ? `<pre class="login-output">${escapeHtml(flow.output)}</pre>` : ""}
-    <div class="status-actions">
-      ${running ? `<button class="ghost-button" data-cancel-login type="button">Cancel</button>` : ""}
-      <button class="ghost-button" data-recheck type="button">Recheck</button>
-    </div>
+    <span class="pairing-minor">${escapeHtml(formatLoginStatus(flow.status))}</span>
+    ${running ? `<button class="ghost-button" data-cancel-login type="button">취소</button>` : `<button class="primary-button big" data-recheck type="button">계속</button>`}
   `;
 }
 
 function formatLoginStatus(status) {
-  if (status === "running") return "OpenAI login in progress";
-  if (status === "completed") return "OpenAI login completed";
-  if (status === "already_logged_in") return "Already logged in";
-  if (status === "cancelled") return "OpenAI login cancelled";
-  if (status === "failed") return "OpenAI login failed";
-  return "OpenAI login";
+  if (status === "running") return "OpenAI 로그인 중";
+  if (status === "completed") return "로그인 완료";
+  if (status === "already_logged_in") return "로그인 완료";
+  if (status === "cancelled") return "로그인 취소됨";
+  if (status === "failed") return "로그인 실패";
+  return "OpenAI 로그인";
 }
 
 function renderDesktopStatus(status) {
   const codexOk = status.codex?.installed;
   const loginOk = status.login?.loggedIn;
   const ready = codexOk && loginOk;
-  const loginFlow = status.loginFlow || {};
+  if (ready) return "";
+  if (!codexOk) {
+    return `
+      <button class="primary-button big" data-recheck type="button">다시 확인</button>
+      <span class="pairing-minor">Codex CLI 필요</span>
+    `;
+  }
   return `
-    <div class="status-row">
-      <span class="status-dot ${codexOk ? "ok" : "bad"}"></span>
-      <span>Codex CLI ${codexOk ? escapeHtml(status.codex.version || "installed") : "not found"}</span>
-    </div>
-    <div class="status-row">
-      <span class="status-dot ${loginOk ? "ok" : "bad"}"></span>
-      <span>${loginOk ? `Logged in${status.login.provider ? ` using ${escapeHtml(status.login.provider)}` : ""}` : "OpenAI login required"}</span>
-    </div>
-    <div class="status-row">
-      <span class="status-dot ${ready ? "ok" : "pending"}"></span>
-      <span>${ready ? "Ready to show phone QR" : "Desktop setup runs here first"}</span>
-    </div>
-    ${!codexOk ? `<p class="status-detail">Install Codex CLI first, then recheck.</p>` : ""}
-    ${codexOk && !loginOk ? `<p class="status-detail">Start OpenAI login on this computer, then return here after the browser flow completes.</p>` : ""}
-    ${loginFlow.output && !loginOk ? `<pre class="login-output">${escapeHtml(loginFlow.output)}</pre>` : ""}
-    <div class="status-actions">
-      ${codexOk && !loginOk ? `<button class="primary-button small" data-start-login type="button">OpenAI login</button>` : ""}
-      <button class="ghost-button" data-recheck type="button">Recheck</button>
-    </div>
+    <button class="primary-button big" data-start-login type="button">OpenAI 로그인</button>
   `;
 }
 
-function updatePairControls() {
-  const button = document.querySelector("#start-pair");
-  if (!button) return;
-  button.disabled = !state.desktopReady;
-  button.textContent = state.desktopReady ? "Show mobile QR" : "Finish desktop setup first";
+async function showPairingQr() {
+  const stage = document.querySelector("#qr-stage");
+  if (!stage) return;
+  stage.innerHTML = `<span class="pairing-minor">QR 준비 중...</span>`;
+  try {
+    const result = await fetchJson("/api/pair/start", { method: "POST", auth: false });
+    renderPairingCode(result);
+  } catch (error) {
+    stage.innerHTML = `<button class="primary-button big" data-recheck type="button">다시 시도</button><span class="pairing-minor">${escapeHtml(error.message)}</span>`;
+  }
 }
 
 function renderPairingCode(result) {
-  document.querySelector("#pair-help").innerHTML = `
+  document.querySelector("#qr-stage").innerHTML = `
     <span class="qr-card">${result.qrSvg}</span>
-    <span class="pair-code-label">Code ${escapeHtml(result.code)}</span>
-    <span class="pair-url">${escapeHtml(result.qrUrl)}</span>
   `;
 }
 
 async function completePair(code) {
-  const help = document.querySelector("#pair-help");
+  const stage = document.querySelector("#qr-stage") || document.querySelector("#desktop-status");
   try {
     const result = await fetchJson("/api/pair/complete", {
       method: "POST",
@@ -219,7 +187,7 @@ async function completePair(code) {
     localStorage.setItem("codexMobileToken", state.token);
     await loadProjects();
   } catch (error) {
-    if (help) help.textContent = error.message;
+    if (stage) stage.textContent = error.message;
   }
 }
 

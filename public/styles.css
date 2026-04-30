@@ -53,7 +53,8 @@ button:disabled {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 18px;
+  align-items: center;
+  gap: 22px;
   padding: 32px 22px;
 }
 
@@ -92,19 +93,6 @@ h1 {
   font-size: clamp(38px, 12vw, 64px);
   line-height: 0.95;
   letter-spacing: 0;
-}
-
-.pairing-view p {
-  max-width: 36rem;
-  color: var(--muted);
-  line-height: 1.55;
-}
-
-.pair-form {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 10px;
-  margin-top: 10px;
 }
 
 input,
@@ -153,6 +141,12 @@ select {
   font-weight: 800;
 }
 
+.primary-button.big {
+  min-width: min(280px, calc(100vw - 44px));
+  min-height: 52px;
+  font-size: 16px;
+}
+
 .ghost-button,
 .icon-button,
 .tab-button {
@@ -171,79 +165,16 @@ select {
   color: var(--muted);
 }
 
-.status-panel {
+.pairing-action,
+.qr-stage {
   display: grid;
+  justify-items: center;
   gap: 10px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--panel);
-  padding: 14px;
 }
 
-.status-panel .ghost-button,
-.status-panel .primary-button {
-  width: max-content;
-}
-
-.status-row {
-  gap: 10px;
-  color: var(--text);
-  font-size: 14px;
-}
-
-.status-detail {
+.pairing-minor {
   color: var(--muted);
   font-size: 13px;
-}
-
-.status-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.primary-button.small {
-  min-height: 42px;
-}
-
-.login-output {
-  max-height: 170px;
-  overflow: auto;
-  margin: 0;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #11110f;
-  color: var(--muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.status-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 999px;
-  background: var(--faint);
-  flex: 0 0 auto;
-}
-
-.status-dot.ok {
-  background: var(--ok);
-}
-
-.status-dot.bad {
-  background: var(--danger);
-}
-
-.status-dot.pending {
-  background: var(--accent);
-}
-
-#pair-help {
-  display: grid;
-  gap: 10px;
 }
 
 .qr-card {
