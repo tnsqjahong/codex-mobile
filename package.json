@@ -1,0 +1,15 @@
+{
+  "name": "codex-mobile-companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/bridge/server.js",
+    "doctor": "node src/bridge/doctor.js",
+    "setup": "npm run doctor",
+    "probe": "node src/bridge/probe.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
