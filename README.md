@@ -142,3 +142,7 @@ npm start
 The setup command requires no npm install because the prototype has no external dependencies. For general users, this should become a packaged macOS desktop app that bundles Node or a compiled runtime, runs the same checks in a first-run wizard, and starts the bridge without exposing Terminal.
 
 In the packaged desktop app, users should not run `codex login --device-auth` themselves. The app should start that flow internally when needed, wait for the browser-based OpenAI login to complete, then enable the QR button.
+
+## License
+
+MIT
