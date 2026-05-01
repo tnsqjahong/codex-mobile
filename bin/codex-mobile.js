@@ -149,7 +149,7 @@ async function startRemoteTunnel(target) {
 
 async function resolveTunnelCommand() {
   if (await commandExists("cloudflared")) return { command: "cloudflared", args: ["--config", "/dev/null"] };
-  if (await commandExists("npx")) return { command: "npx", args: ["--yes", "cloudflared"] };
+  if (await commandExists("npx")) return { command: "npx", args: ["--yes", "cloudflared", "--config", "/dev/null"] };
   throw new Error("cloudflared or npx is required for remote access");
 }
 
