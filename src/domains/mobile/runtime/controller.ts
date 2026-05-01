@@ -1,6 +1,3 @@
-import { useEffect } from "react";
-import { createRoot } from "react-dom/client";
-
 type AnyRecord = Record<string, any>;
 
 const FILE_ATTACHMENT_ACCEPT = [
@@ -12,7 +9,8 @@ const FILE_ATTACHMENT_ACCEPT = [
   "text/*", "application/json", "application/pdf", "application/zip", "application/x-zip-compressed",
 ].join(",");
 
-const state: AnyRecord = {
+export const state: AnyRecord = {
+  version: 0,
   token: localStorage.getItem("codexMobileToken"),
   projects: [],
   threads: [],
@@ -39,6 +37,7 @@ const state: AnyRecord = {
   draftText: "",
   creatingThread: false,
   startPendingMessage: null,
+  screen: "workspace",
   activeTab: "chat",
   projectSearch: "",
   threadSearch: "",
@@ -49,6 +48,11 @@ const state: AnyRecord = {
   approvals: new Map(),
   loginPoll: null,
   desktopReady: false,
+  desktopStatus: null,
+  desktopStatusError: "",
+  loginFlow: null,
+  pairing: null,
+  pairingError: "",
   notificationsEnabled: "Notification" in window && Notification.permission === "granted" && localStorage.getItem("codexMobileNotifications") === "enabled",
   sidebarOpen: window.matchMedia("(min-width: 900px)").matches,
   threadsLoading: false,
@@ -65,25 +69,29 @@ const state: AnyRecord = {
 
 const app = document.querySelector("#app") as HTMLElement;
 
-createRoot(app).render(<CodexMobileRuntime />);
+const listeners = new Set<() => void>();
 
-function CodexMobileRuntime() {
-  useEffect(() => {
-    void init();
-  }, []);
-  return (
-    <section className="pairing-view">
-      <div className="brand-row">
-        <span className="brand-mark"></span>
-        <span>Codex Mobile</span>
-      </div>
-      <div id="desktop-status" className="pairing-action" aria-live="polite"></div>
-      <div id="qr-stage" className="qr-stage" aria-live="polite"></div>
-    </section>
-  );
+export function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
-async function init() {
+export function getSnapshot() {
+  return state;
+}
+
+export function patchState(next: AnyRecord | ((current: AnyRecord) => AnyRecord)) {
+  const value = typeof next === "function" ? next(state) : next;
+  Object.assign(state, value || {});
+  emit();
+}
+
+function emit() {
+  state.version += 1;
+  listeners.forEach((listener) => listener());
+}
+
+export async function init() {
   await removeLegacyWebAppCache();
   const pair = new URL(location.href).searchParams.get("pair");
   if (pair && !state.token) {
@@ -111,56 +119,46 @@ async function removeLegacyWebAppCache() {
 }
 
 function renderCurrentView() {
-  if (!state.token) return;
-  renderWorkspace();
+  emit();
 }
 
 function bindPairing() {
-  document.querySelector(".pairing-view")?.addEventListener("click", async (event) => {
-    const target = event.target as HTMLElement;
-    if (target.closest("[data-recheck]")) await loadDesktopStatus();
-    if (target.closest("[data-start-login]")) await startDesktopLogin();
-    if (target.closest("[data-cancel-login]")) await cancelDesktopLogin();
-  });
+  emit();
 }
 
-async function loadDesktopStatus() {
-  const container = document.querySelector("#desktop-status");
-  if (!container) return;
-  container.innerHTML = `<span class="pairing-minor">Checking...</span>`;
+export async function loadDesktopStatus() {
+  state.desktopStatusError = "";
+  state.pairingError = "";
+  emit();
   try {
     const status = await fetchJson("/api/desktop/status", { auth: false });
     state.desktopReady = Boolean(status.ok);
-    container.innerHTML = renderDesktopStatus(status);
+    state.desktopStatus = status;
+    state.loginFlow = null;
     if (state.desktopReady) await showPairingQr();
-    else {
-      const stage = document.querySelector("#qr-stage");
-      if (stage) stage.innerHTML = "";
-    }
+    else state.pairing = null;
   } catch (error) {
     state.desktopReady = false;
-    container.innerHTML = `
-      <button class="primary-button big" data-recheck type="button">다시 시도</button>
-      <span class="pairing-minor">${escapeHtml(error.message)}</span>
-    `;
+    state.desktopStatus = null;
+    state.pairing = null;
+    state.desktopStatusError = String(error.message || error);
+    emit();
   }
 }
 
-async function startDesktopLogin() {
+export async function startDesktopLogin() {
   state.desktopReady = false;
-  const container = document.querySelector("#desktop-status");
-  if (container) {
-    container.innerHTML = `<span class="pairing-minor">로그인 중...</span>`;
-  }
   const flow = await fetchJson("/api/desktop/login/start", { method: "POST", auth: false });
-  renderLoginFlow(flow);
+  state.loginFlow = flow;
+  emit();
   if (flow.running || flow.status === "running") pollDesktopLogin();
   else await loadDesktopStatus();
 }
 
-async function cancelDesktopLogin() {
+export async function cancelDesktopLogin() {
   const flow = await fetchJson("/api/desktop/login/cancel", { method: "POST", auth: false });
-  renderLoginFlow(flow);
+  state.loginFlow = flow;
+  emit();
   clearLoginPoll();
   await loadDesktopStatus();
 }
@@ -169,7 +167,8 @@ function pollDesktopLogin() {
   clearLoginPoll();
   state.loginPoll = setInterval(async () => {
     const flow = await fetchJson("/api/desktop/login/status", { auth: false });
-    renderLoginFlow(flow);
+    state.loginFlow = flow;
+    emit();
     if (!flow.running && flow.status !== "running") {
       clearLoginPoll();
       setTimeout(loadDesktopStatus, 800);
@@ -183,13 +182,8 @@ function clearLoginPoll() {
 }
 
 function renderLoginFlow(flow) {
-  const container = document.querySelector("#desktop-status");
-  if (!container) return;
-  const running = flow.running || flow.status === "running";
-  container.innerHTML = `
-    <span class="pairing-minor">${escapeHtml(formatLoginStatus(flow.status))}</span>
-    ${running ? `<button class="ghost-button" data-cancel-login type="button">취소</button>` : `<button class="primary-button big" data-recheck type="button">계속</button>`}
-  `;
+  state.loginFlow = flow;
+  emit();
 }
 
 function formatLoginStatus(status) {
@@ -217,26 +211,26 @@ function renderDesktopStatus(status) {
   `;
 }
 
-async function showPairingQr() {
-  const stage = document.querySelector("#qr-stage");
-  if (!stage) return;
-  stage.innerHTML = `<span class="pairing-minor">QR 준비 중...</span>`;
+export async function showPairingQr() {
+  state.pairing = null;
+  state.pairingError = "";
+  emit();
   try {
     const result = await fetchJson("/api/pair/start", { method: "POST", auth: false });
     renderPairingCode(result);
   } catch (error) {
-    stage.innerHTML = `<button class="primary-button big" data-recheck type="button">다시 시도</button><span class="pairing-minor">${escapeHtml(error.message)}</span>`;
+    state.pairingError = String(error.message || error);
+    emit();
   }
 }
 
 function renderPairingCode(result) {
-  document.querySelector("#qr-stage").innerHTML = `
-    <span class="qr-card">${result.qrSvg}</span>
-  `;
+  state.pairing = result;
+  state.pairingError = "";
+  emit();
 }
 
-async function completePair(code) {
-  const stage = document.querySelector("#qr-stage") || document.querySelector("#desktop-status");
+export async function completePair(code) {
   try {
     const result = await fetchJson("/api/pair/complete", {
       method: "POST",
@@ -249,12 +243,9 @@ async function completePair(code) {
     await loadProjects();
     return true;
   } catch (error) {
-    if (stage) {
-      const expired = String(error.message || "").toLowerCase().includes("expired");
-      stage.innerHTML = `
-        <span class="pairing-minor">${expired ? "QR 코드가 만료됐어요. 컴퓨터에서 새 QR을 다시 스캔해주세요." : escapeHtml(error.message)}</span>
-      `;
-    }
+    const expired = String(error.message || "").toLowerCase().includes("expired");
+    state.pairingError = expired ? "QR 코드가 만료됐어요. 컴퓨터에서 새 QR을 다시 스캔해주세요." : String(error.message || error);
+    emit();
     bindPairing();
     return false;
   }
@@ -332,6 +323,7 @@ function rememberActiveThread(cwd, threadId) {
 
 async function loadThreads(project, options: AnyRecord = {}) {
   state.selectedProject = project;
+  state.screen = "workspace";
   state.threadsLoading = true;
   state.threads = [];
   renderWorkspace();
@@ -360,6 +352,7 @@ async function loadThread(threadId) {
   state.composerMentions = [];
   state.uploadingAttachments = false;
   state.draftText = "";
+  state.screen = "workspace";
   const [result] = await Promise.all([
     fetchJson(`/api/threads/${encodeURIComponent(threadId)}`),
     loadModels(),
@@ -638,7 +631,13 @@ async function commitChanges() {
 async function loadSettings() {
   const query = state.selectedProject?.cwd ? `?cwd=${encodeURIComponent(state.selectedProject.cwd)}` : "";
   state.settings = await fetchJson(`/api/settings${query}`);
+  state.screen = "settings";
   renderSettings();
+}
+
+export function backToWorkspace() {
+  state.screen = "workspace";
+  emit();
 }
 
 async function enableNotifications() {
@@ -890,43 +889,20 @@ function isThreadIdle(thread) {
 }
 
 function renderProjects() {
-  renderWorkspace();
+  emit();
 }
 
 function renderThreads() {
-  renderWorkspace();
+  emit();
 }
 
 function renderThread(options: AnyRecord = {}) {
-  if (options.timelineOnly && renderTimelineOnly()) return;
-  renderWorkspace();
+  void options;
+  emit();
 }
 
 function renderWorkspace() {
-  const previousRenderState = captureRenderState();
-  const thread = state.thread;
-  const project = state.selectedProject;
-  const title = thread?.name || thread?.preview || project?.name || "Codex Mobile";
-  const subtitle = thread ? (project?.name || thread?.cwd || "Local Codex") : (project?.cwd || "Local Codex");
-  app.innerHTML = `
-    <section class="app-workspace ${state.sidebarOpen ? "sidebar-visible" : ""}">
-      ${state.sidebarOpen ? `<button class="sidebar-backdrop" data-close-sidebar aria-label="Close sidebar"></button>` : ""}
-      ${renderSidebar()}
-      <main class="main-pane">
-        <header class="app-header">
-          <button class="icon-button" data-toggle-sidebar aria-label="Chats">☰</button>
-          <div class="topbar-title">
-            <strong>${escapeHtml(title)}</strong>
-            <span>${escapeHtml(subtitle)}</span>
-          </div>
-          ${renderHeaderChangesButton()}
-        </header>
-        ${renderMainPane()}
-      </main>
-    </section>
-  `;
-  bindWorkspaceControls();
-  restoreRenderState(previousRenderState);
+  emit();
 }
 
 function renderHeaderChangesButton() {
@@ -948,6 +924,7 @@ function renderSidebar() {
           <strong>Codex</strong>
           <span>${state.projects.length} projects</span>
         </div>
+        <button class="icon-button sidebar-close" data-close-sidebar type="button" aria-label="Close chats">${uiIcon("close")}</button>
       </div>
       <label class="project-picker">
         <span>Project</span>
@@ -957,7 +934,7 @@ function renderSidebar() {
       </label>
       <div class="sidebar-tools">
         <input id="thread-search" value="${escapeAttr(state.threadSearch)}" placeholder="Search chats" />
-        <button class="ghost-button compact" data-new-thread type="button">New</button>
+        <button class="ghost-button compact new-session-button" data-new-thread type="button">${uiIcon("plus")}<span>New session</span></button>
       </div>
       <div class="thread-list">
         ${renderThreadList()}
@@ -972,13 +949,16 @@ function renderSidebarFooter() {
   return `
     <div class="sidebar-footer">
       <button class="sidebar-action ${state.activeTab === "chat" ? "active" : ""}" data-sidebar-tab="chat" type="button" ${state.thread ? "" : "disabled"}>
+        ${uiIcon("chat")}
         <span>Chat</span>
       </button>
       <button class="sidebar-action ${state.activeTab === "changes" ? "active" : ""}" data-sidebar-tab="changes" type="button" ${state.thread ? "" : "disabled"}>
+        ${uiIcon("changes")}
         <span>Changes</span>
         ${count ? `<strong>${count}</strong>` : ""}
       </button>
       <button class="sidebar-action" data-settings type="button">
+        ${uiIcon("settings")}
         <span>Settings</span>
       </button>
     </div>
@@ -988,19 +968,38 @@ function renderSidebarFooter() {
 function renderThreadList() {
   const threads = filteredThreads();
   return `
-    ${state.projectsLoading ? `<p class="empty-state compact-empty">Loading projects...</p>` : ""}
-    ${state.threadsLoading ? `<p class="empty-state compact-empty">Loading chats...</p>` : ""}
+    ${!state.projectsLoading && !state.threadsLoading ? `<div class="sidebar-section-label"><span>Recents</span><strong>${threads.length}</strong></div>` : ""}
+    ${state.projectsLoading ? renderThreadSkeletons("Loading projects...") : ""}
+    ${state.threadsLoading ? renderThreadSkeletons("Loading chats...") : ""}
     ${!state.projectsLoading && !state.threadsLoading && threads.map(renderThreadListItem).join("")}
     ${!state.projectsLoading && !state.threadsLoading && !threads.length ? `<p class="empty-state compact-empty">${state.threadSearch ? "No matching chats." : "No chats in this project."}</p>` : ""}
   `;
 }
 
+function renderThreadSkeletons(label) {
+  return `
+    <div class="sidebar-section-label loading-label"><span>${escapeHtml(label)}</span></div>
+    ${Array.from({ length: 4 }).map(() => `
+      <div class="thread-item skeleton-thread" aria-hidden="true">
+        <strong></strong>
+        <span></span>
+      </div>
+    `).join("")}
+  `;
+}
+
 function renderThreadListItem(thread) {
   const active = thread.id === state.thread?.id;
+  const status = formatThreadStatus(thread.status);
+  const label = formatThreadListLabel(thread);
+  const tone = threadStatusTone(status);
   return `
-    <button class="thread-item ${active ? "active" : ""}" data-thread-id="${escapeAttr(thread.id)}" type="button">
+    <button class="thread-item ${active ? "active" : ""}" data-thread-id="${escapeAttr(thread.id)}" type="button" ${active ? `aria-current="true"` : ""} title="${escapeAttr(thread.name || thread.title || thread.preview || "Untitled")}">
       <strong>${escapeHtml(thread.name || thread.title || thread.preview || "Untitled")}</strong>
-      <span>${escapeHtml(formatThreadStatus(thread.status) || formatDate(thread.updatedAt || thread.createdAt))}</span>
+      <span class="thread-meta">
+        <span class="thread-status ${escapeAttr(tone)}">${escapeHtml(label)}</span>
+        ${thread.updatedAt || thread.createdAt ? `<time>${escapeHtml(formatDate(thread.updatedAt || thread.createdAt))}</time>` : ""}
+      </span>
     </button>
   `;
 }
@@ -1147,10 +1146,10 @@ function renderStartSuggestions() {
     "테스트를 실행하고 실패하면 고쳐줘",
   ];
   return `
-    <div class="start-suggestions" aria-label="Suggested prompts">
+      <div class="start-suggestions" aria-label="Suggested prompts">
       ${suggestions.map((text) => `
         <button data-start-prompt="${escapeAttr(text)}" type="button">
-          <span></span>
+          <span>${uiIcon("spark")}</span>
           <strong>${escapeHtml(text)}</strong>
         </button>
       `).join("")}
@@ -1166,7 +1165,7 @@ function renderThinkingIndicator(turns = []) {
     return type === "agentMessage" && extractText(item).trim();
   });
   if (hasOpenAgentMessage) return "";
-  return `<div class="message agent thinking" aria-live="polite">생각중...</div>`;
+  return `<div class="message agent thinking" aria-live="polite"><span class="thinking-dots"><i></i><i></i><i></i></span><span>Codex가 작업 중입니다</span></div>`;
 }
 
 function renderQueuedMessages() {
@@ -1179,9 +1178,9 @@ function renderQueuedMessages() {
           <span>${index + 1}.</span>
           <p>${escapeHtml(message.text || summarizeAttachments(message.attachments))}</p>
           <div>
-            <button data-queue-steer="${escapeAttr(message.id)}" type="button">스티어링</button>
-            <button data-queue-edit="${escapeAttr(message.id)}" type="button">편집</button>
-            <button data-queue-delete="${escapeAttr(message.id)}" type="button">삭제</button>
+            <button class="queue-action" data-queue-steer="${escapeAttr(message.id)}" type="button">${uiIcon("send")}<span>바로 보내기</span></button>
+            <button class="queue-action" data-queue-edit="${escapeAttr(message.id)}" type="button">${uiIcon("edit")}<span>편집</span></button>
+            <button class="queue-action danger" data-queue-delete="${escapeAttr(message.id)}" type="button">${uiIcon("trash")}<span>삭제</span></button>
           </div>
         </div>
       `).join("")}
@@ -1269,8 +1268,8 @@ function renderComposer(options: AnyRecord = {}) {
   const stopInsteadOfSend = isThreadBusy() && !hasDraft;
   const className = options.start ? "composer start-composer" : "composer";
   const placeholder = options.start
-    ? "Codex에게 뭐든 물어보세요. @ 파일, $ skill, / 명령"
-    : "Message Codex";
+    ? "Codex에게 뭐든 물어보세요. @파일, $skill, /명령"
+    : "Codex에게 메시지 보내기";
   return `
     <div class="skill-picker" id="composer-suggestions" hidden></div>
     <form class="${className}" id="composer">
@@ -1278,26 +1277,28 @@ function renderComposer(options: AnyRecord = {}) {
       <textarea id="message-input" placeholder="${escapeAttr(placeholder)}">${escapeHtml(state.draftText)}</textarea>
       <div class="composer-controls">
         <div class="composer-left">
-          <button class="composer-icon" data-attach type="button" aria-label="Attach file">+</button>
-          <button class="permission-pill" data-menu-toggle="permission" type="button" aria-label="Permissions">
+          <button class="composer-icon" data-attach type="button" aria-label="Attach file">${uiIcon("plus")}</button>
+          <button class="permission-pill ${state.openComposerMenu === "permission" ? "open" : ""}" data-menu-toggle="permission" type="button" aria-label="Permissions" aria-expanded="${state.openComposerMenu === "permission" ? "true" : "false"}">
+            ${uiIcon("shield")}
             ${escapeHtml(currentPermissionOption().label)}
-            <span>⌄</span>
+            <span>${uiIcon("chevronDown")}</span>
           </button>
         </div>
         <div class="composer-right">
           ${renderTokenDial()}
-          <button class="model-pill" data-menu-toggle="model" type="button" aria-label="Model and reasoning">
+          <button class="model-pill ${state.openComposerMenu === "model" ? "open" : ""}" data-menu-toggle="model" type="button" aria-label="Model and reasoning" aria-expanded="${state.openComposerMenu === "model" ? "true" : "false"}">
+            ${uiIcon("brain")}
             <strong>${escapeHtml(formatModelLabel(state.selectedModel || state.modelConfig?.model || "default"))}</strong>
             <span>${escapeHtml(formatEffortLabel(state.selectedEffort || ""))}</span>
-            <i>⌄</i>
+            <i>${uiIcon("chevronDown")}</i>
           </button>
-          <button class="composer-send ${stopInsteadOfSend ? "stop" : ""}" aria-label="${stopInsteadOfSend ? "Stop" : "Send"}" ${state.uploadingAttachments ? "disabled" : ""}>${stopInsteadOfSend ? "■" : "↑"}</button>
+          <button class="composer-send ${stopInsteadOfSend ? "stop" : ""}" aria-label="${stopInsteadOfSend ? "Stop" : "Send"}" ${state.uploadingAttachments ? "disabled" : ""}>${stopInsteadOfSend ? uiIcon("stop") : uiIcon("send")}</button>
         </div>
       </div>
       ${renderComposerMenu()}
       <div class="composer-footer">
         <span>${escapeHtml(state.selectedProject?.name || "Project")}</span>
-        <span>로컬에서 작업</span>
+        <span>로컬 Codex 세션</span>
         ${renderBranchSelect()}
       </div>
       <input id="file-input" type="file" multiple hidden accept="${escapeAttr(FILE_ATTACHMENT_ACCEPT)}" />
@@ -1555,26 +1556,26 @@ function renderModelMenu() {
   const selectedModel = state.selectedModel || state.modelConfig?.model || "";
   return `
     <div class="composer-menu model-menu">
-      <span class="menu-title">인텔리전스</span>
+      <span class="menu-title">${uiIcon("brain")}<span>인텔리전스</span></span>
       ${currentEfforts().map((effort) => `
-        <button class="menu-option" data-effort="${escapeAttr(effort)}" type="button">
+        <button class="menu-option ${effort === state.selectedEffort ? "selected" : ""}" data-effort="${escapeAttr(effort)}" type="button" role="menuitemradio" aria-checked="${effort === state.selectedEffort ? "true" : "false"}">
           <span>${escapeHtml(formatEffortLabel(effort))}</span>
-          ${effort === state.selectedEffort ? `<strong>✓</strong>` : ""}
+          ${effort === state.selectedEffort ? `<strong>${uiIcon("check")}</strong>` : ""}
         </button>
       `).join("")}
       <hr />
       ${state.models.map((item) => {
         const value = item.model || item.id;
         return `
-          <button class="menu-option" data-model="${escapeAttr(value)}" type="button">
+          <button class="menu-option ${value === selectedModel ? "selected" : ""}" data-model="${escapeAttr(value)}" type="button" role="menuitemradio" aria-checked="${value === selectedModel ? "true" : "false"}">
             <span>${escapeHtml(item.displayName || formatModelLabel(value))}</span>
-            ${value === selectedModel ? `<strong>✓</strong>` : `<i>›</i>`}
+            ${value === selectedModel ? `<strong>${uiIcon("check")}</strong>` : `<i>${uiIcon("chevronRight")}</i>`}
           </button>
         `;
       }).join("") || `
-        <button class="menu-option" type="button">
+        <button class="menu-option selected" type="button">
           <span>${escapeHtml(formatModelLabel(selectedModel || "default"))}</span>
-          <strong>✓</strong>
+          <strong>${uiIcon("check")}</strong>
         </button>
       `}
     </div>
@@ -1585,9 +1586,9 @@ function renderPermissionMenu() {
   return `
     <div class="composer-menu permission-menu">
       ${permissionOptions().map((option) => `
-        <button class="menu-option permission-option" data-permission="${escapeAttr(option.value)}" type="button">
+        <button class="menu-option permission-option ${option.value === state.selectedPermission ? "selected" : ""}" data-permission="${escapeAttr(option.value)}" type="button" role="menuitemradio" aria-checked="${option.value === state.selectedPermission ? "true" : "false"}">
           <span>${escapeHtml(option.label)}</span>
-          ${option.value === state.selectedPermission ? `<strong>✓</strong>` : ""}
+          ${option.value === state.selectedPermission ? `<strong>${uiIcon("check")}</strong>` : ""}
         </button>
       `).join("")}
     </div>
@@ -2149,6 +2150,26 @@ function formatThreadStatus(status) {
   return String(status);
 }
 
+function formatThreadListLabel(thread) {
+  const status = formatThreadStatus(thread.status);
+  const normalized = status.toLowerCase();
+  if (!status || normalized === "notloaded" || normalized === "not_loaded") return "대화 준비";
+  if (/(running|working|active)/.test(normalized)) return "실행 중";
+  if (/(queued|pending)/.test(normalized)) return "대기 중";
+  if (/(failed|error)/.test(normalized)) return "확인 필요";
+  if (/(completed|succeeded|done|idle|finished)/.test(normalized)) return "완료";
+  return status;
+}
+
+function threadStatusTone(status) {
+  const normalized = String(status || "").toLowerCase();
+  if (/(running|working|active)/.test(normalized)) return "busy";
+  if (/(queued|pending)/.test(normalized)) return "pending";
+  if (/(failed|error)/.test(normalized)) return "danger";
+  if (/(completed|succeeded|done|idle|finished)/.test(normalized)) return "done";
+  return "neutral";
+}
+
 function renderItem(item) {
   const type = item.type || item.kind || "unknown";
   if (type === "userMessage") return renderMessage("user", item);
@@ -2157,9 +2178,9 @@ function renderItem(item) {
     return `<div class="message user">${renderAttachmentPreviews(extractAttachments(item))}</div>`;
   }
   if (type === "commandExecution" || type === "fileChange" || type === "webSearch") {
-    return `<details class="tool-card"><summary>${escapeHtml(type)}</summary><pre>${escapeHtml(JSON.stringify(item, null, 2))}</pre></details>`;
+    return renderToolCard(type, item);
   }
-  return `<details class="tool-card"><summary>${escapeHtml(type)}</summary><pre>${escapeHtml(JSON.stringify(item, null, 2))}</pre></details>`;
+  return renderToolCard(type, item);
 }
 
 function renderMessage(role, item) {
@@ -2169,9 +2190,204 @@ function renderMessage(role, item) {
   return `
     <div class="message ${role}">
       ${renderAttachmentPreviews(dedupeAttachments(attachments))}
-      ${text.trim() ? `<div>${escapeHtml(text.trim())}</div>` : ""}
+      ${text.trim() ? `<div class="message-body markdown-body">${renderMarkdown(text.trim())}</div>` : ""}
     </div>
   `;
+}
+
+function renderToolCard(type, item) {
+  const title = toolTitle(type);
+  const status = formatThreadStatus(item.status || item.outcome || item.result?.status);
+  const summary = toolSummary(type, item);
+  const preview = toolPreview(type, item);
+  return `
+    <details class="tool-card ${threadStatusTone(status)}">
+      <summary>
+        <span class="tool-title">${uiIcon(toolIconName(type))}<span>${escapeHtml(title)}</span></span>
+        <span class="tool-summary">${escapeHtml(summary)}</span>
+        ${status ? `<strong class="tool-status">${escapeHtml(formatThreadListLabel({ status }))}</strong>` : ""}
+      </summary>
+      ${preview ? `<div class="tool-preview">${escapeHtml(preview)}</div>` : ""}
+      <pre>${escapeHtml(JSON.stringify(item, null, 2))}</pre>
+    </details>
+  `;
+}
+
+function toolIconName(type) {
+  if (type === "commandExecution") return "terminal";
+  if (type === "fileChange") return "file";
+  if (type === "webSearch") return "search";
+  return "tool";
+}
+
+function toolTitle(type) {
+  const labels = {
+    commandExecution: "실행된 명령",
+    fileChange: "파일 변경",
+    webSearch: "웹 검색",
+    unknown: "작업 세부 정보",
+  };
+  return labels[type] || type;
+}
+
+function toolSummary(type, item) {
+  if (type === "commandExecution") return summarizeCommand(item.command || item.commandActions?.[0]?.command || item.argv?.join?.(" "));
+  if (type === "webSearch") return item.query || item.action?.url || "검색 작업";
+  if (type === "fileChange") return item.path || item.filePath || item.name || "파일 변경";
+  return item.name || item.title || item.id || "작업 세부 정보";
+}
+
+function toolPreview(type, item) {
+  if (type === "commandExecution") return item.command || item.commandActions?.[0]?.command || "";
+  if (type === "webSearch") return item.action?.url || item.query || "";
+  if (type === "fileChange") return item.diff || item.path || item.filePath || "";
+  return "";
+}
+
+function summarizeCommand(command) {
+  const value = String(command || "").replace(/^\/bin\/(?:zsh|bash|sh)\s+-lc\s+/, "").trim();
+  if (!value) return "명령 실행";
+  return value.length > 96 ? `${value.slice(0, 93)}…` : value;
+}
+
+function renderMarkdown(text) {
+  const normalized = String(text || "").replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let codeLines = [];
+  let codeLang = "";
+  let inCode = false;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push(`<p>${renderInlineMarkdown(paragraph.join(" ").trim())}</p>`);
+    paragraph = [];
+  };
+  const flushCode = () => {
+    const language = codeLang ? `<span class="code-language">${escapeHtml(codeLang)}</span>` : "";
+    blocks.push(`<pre class="code-block">${language}<code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    codeLines = [];
+    codeLang = "";
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    const line = rawLine.trimEnd();
+    const fence = line.match(/^```([A-Za-z0-9_-]+)?\s*$/);
+    if (fence) {
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        flushParagraph();
+        inCode = true;
+        codeLang = fence[1] || "";
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(rawLine);
+      continue;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      continue;
+    }
+    if (/^\s*[-*_]{3,}\s*$/.test(line)) {
+      flushParagraph();
+      blocks.push("<hr />");
+      continue;
+    }
+    if (/^#{1,4}\s+/.test(line)) {
+      flushParagraph();
+      const level = Math.min(4, line.match(/^#+/)?.[0].length || 3);
+      blocks.push(`<h${level}>${renderInlineMarkdown(line.replace(/^#{1,4}\s+/, ""))}</h${level}>`);
+      continue;
+    }
+    if (isMarkdownTable(lines, index)) {
+      flushParagraph();
+      const tableRows = [lines[index]];
+      index += 2;
+      while (index < lines.length && looksLikeTableRow(lines[index])) {
+        tableRows.push(lines[index]);
+        index += 1;
+      }
+      index -= 1;
+      blocks.push(renderMarkdownTable(tableRows));
+      continue;
+    }
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      const quoteLines = [quote[1]];
+      while (index + 1 < lines.length && /^>\s?/.test(lines[index + 1])) {
+        index += 1;
+        quoteLines.push(lines[index].replace(/^>\s?/, ""));
+      }
+      blocks.push(`<blockquote>${quoteLines.map((item) => `<p>${renderInlineMarkdown(item)}</p>`).join("")}</blockquote>`);
+      continue;
+    }
+    const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
+    if (listMatch) {
+      flushParagraph();
+      const ordered = /\d+\./.test(listMatch[2]);
+      const items = [listMatch[3]];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1].match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
+        if (!next || /\d+\./.test(next[2]) !== ordered) break;
+        index += 1;
+        items.push(next[3]);
+      }
+      const tag = ordered ? "ol" : "ul";
+      blocks.push(`<${tag}>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${tag}>`);
+      continue;
+    }
+    paragraph.push(line.trim());
+  }
+  if (inCode) flushCode();
+  flushParagraph();
+  return blocks.join("");
+}
+
+function isMarkdownTable(lines, index) {
+  return looksLikeTableRow(lines[index]) && index + 1 < lines.length && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1]);
+}
+
+function looksLikeTableRow(line) {
+  const value = String(line || "").trim();
+  return value.includes("|") && !value.startsWith("```");
+}
+
+function renderMarkdownTable(rows) {
+  const [header, ...body] = rows.map(splitMarkdownRow);
+  return `
+    <div class="markdown-table-wrap">
+      <table>
+        <thead><tr>${header.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("")}</tr></thead>
+        <tbody>${body.map((row) => `<tr>${row.map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function splitMarkdownRow(row) {
+  return String(row || "")
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderInlineMarkdown(value) {
+  const escaped = escapeHtml(value);
+  return escaped
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_match, label, href) => `<a href="${escapeAttr(href)}" target="_blank" rel="noreferrer">${label}</a>`)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
 }
 
 function renderAttachmentPreviews(attachments = []) {
@@ -2314,37 +2530,7 @@ function summarizeApproval(approval) {
 }
 
 function renderSettings() {
-  const settings = state.settings || {};
-  const account = settings.account?.account;
-  const pluginCount = collectPlugins(settings.plugins).length;
-  const skills = (settings.skills?.data || []).flatMap((entry) => entry.skills || []);
-  const apps = settings.apps?.data || [];
-  const automations = settings.automations?.data || [];
-  const mcpServers = settings.mcpServers?.mcpServers || settings.mcpServers?.data || [];
-  app.innerHTML = shell("Settings", "Account, plugins, skills, automations", `
-    <div class="main-scroll settings-view">
-      <section class="settings-card">
-        <h2>Account</h2>
-        <p>${escapeHtml(formatAccount(account, settings.account?.requiresOpenaiAuth))}</p>
-        ${renderRateLimit(settings.rateLimits)}
-      </section>
-      <section class="settings-card">
-        <h2>Runtime</h2>
-        <p>Model ${escapeHtml(settings.config?.summary?.model || "default")} · Reasoning ${escapeHtml(settings.config?.summary?.effort || "default")}</p>
-        <p>Approval ${escapeHtml(formatPermission(settings.config?.summary || {}))}</p>
-      </section>
-      <section class="settings-card">
-        <h2>Notifications</h2>
-        <p>${state.notificationsEnabled ? "Enabled for this browser session." : "Enable notifications while this browser session is connected."}</p>
-        ${"Notification" in window ? `<button class="ghost-button compact" data-enable-notifications type="button" ${state.notificationsEnabled ? "disabled" : ""}>알림 켜기</button>` : `<p class="muted">This browser does not support notifications.</p>`}
-      </section>
-      ${renderCollection("Plugins", pluginCount, collectPlugins(settings.plugins).map((plugin) => plugin.interface?.displayName || plugin.name))}
-      ${renderCollection("Skills", skills.length, skills.map((skill) => skill.name || skill.metadata?.name))}
-      ${renderCollection("Apps", apps.length, apps.map((item) => item.name || item.id))}
-      ${renderCollection("MCP Servers", mcpServers.length, mcpServers.map((item) => item.name || item.id || item.serverName))}
-      ${renderCollection("Automations", automations.length, automations.map((item) => `${item.name}${item.status ? ` · ${item.status}` : ""}`))}
-    </div>
-  `, { back: renderWorkspace });
+  emit();
 }
 
 function collectPlugins(plugins) {
@@ -2443,6 +2629,32 @@ function formatCompactNumber(value) {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(number);
 }
 
+function uiIcon(name) {
+  const icons = {
+    menu: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>`,
+    close: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>`,
+    plus: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`,
+    chat: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.5A3.5 3.5 0 0 1 8.5 3h7A3.5 3.5 0 0 1 19 6.5v4A3.5 3.5 0 0 1 15.5 14H11l-5 4v-4.2A3.5 3.5 0 0 1 5 10.5v-4Z"/></svg>`,
+    changes: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10M7 12h7M7 17h10M4 4v16h16V4H4Z"/></svg>`,
+    settings: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="M18.5 13.5v-3l-2-.4a6.7 6.7 0 0 0-.8-1.8l1.1-1.8-2.1-2.1-1.8 1.1a6.7 6.7 0 0 0-1.8-.8l-.4-2h-3l-.4 2a6.7 6.7 0 0 0-1.8.8L4.7 4.4 2.6 6.5l1.1 1.8a6.7 6.7 0 0 0-.8 1.8l-2 .4v3l2 .4c.2.7.5 1.3.8 1.8l-1.1 1.8 2.1 2.1 1.8-1.1c.6.4 1.2.6 1.8.8l.4 2h3l.4-2c.7-.2 1.3-.5 1.8-.8l1.8 1.1 2.1-2.1-1.1-1.8c.4-.6.6-1.2.8-1.8l2-.4Z"/></svg>`,
+    spark: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3ZM18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8L18 15Z"/></svg>`,
+    shield: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.4-2.8 7.4-7 9.5-4.2-2.1-7-5.1-7-9.5V6l7-3Z"/></svg>`,
+    brain: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4.5A3.5 3.5 0 0 0 5.5 8v.4A3.8 3.8 0 0 0 4 11.5 3.5 3.5 0 0 0 7.5 15H9v4.5M15 4.5A3.5 3.5 0 0 1 18.5 8v.4a3.8 3.8 0 0 1 1.5 3.1A3.5 3.5 0 0 1 16.5 15H15v4.5M9 9h6M9 13h6"/></svg>`,
+    chevronDown: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>`,
+    chevronRight: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>`,
+    check: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7"/></svg>`,
+    send: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l15-7-7 15-2-6-6-2Z"/></svg>`,
+    stop: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h8v8H8z"/></svg>`,
+    edit: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17.5V20h2.5L17.8 8.7l-2.5-2.5L4 17.5Z"/><path d="M14.5 7l2.5 2.5"/></svg>`,
+    trash: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12M9 7V5h6v2M8 7l1 13h6l1-13"/></svg>`,
+    terminal: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M7 9l3 3-3 3M12 16h5"/></svg>`,
+    file: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>`,
+    search: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 18a7.5 7.5 0 1 1 5.3-2.2L20 20"/><path d="M8 10h5"/></svg>`,
+    tool: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6l4 4-9 9H5v-4l9-9Z"/><path d="M13 7l4 4"/></svg>`,
+  };
+  return icons[name] || icons.tool;
+}
+
 function folderIcon() {
   return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-9Z" stroke="currentColor" stroke-width="1.8"/></svg>`;
 }
@@ -2459,3 +2671,63 @@ function escapeHtml(value = "") {
 function escapeAttr(value = "") {
   return escapeHtml(value);
 }
+
+export const mobileController = {
+  init,
+  loadDesktopStatus,
+  startDesktopLogin,
+  cancelDesktopLogin,
+  showPairingQr,
+  completePair,
+  loadProjects,
+  loadThreads,
+  loadThread,
+  createThread,
+  loadModels,
+  loadSettings,
+  backToWorkspace,
+  loadChanges,
+  loadBranches,
+  loadTokenUsage,
+  loadSkills,
+  sendMessage,
+  interruptThread,
+  runThreadAction,
+  checkoutBranch,
+  commitChanges,
+  enableNotifications,
+  answerApproval,
+  flushMessageQueue,
+  steerQueuedMessage,
+  removeQueuedMessage,
+  editQueuedMessage,
+  uploadAttachments,
+  renderCurrentView,
+};
+
+export const mobileSelectors = {
+  formatDate,
+  formatClock,
+  formatCompactNumber,
+  formatThreadStatus,
+  formatThreadListLabel,
+  threadStatusTone,
+  renderMarkdown,
+  extractText,
+  extractAttachments,
+  parseMentionedFilesText,
+  dedupeAttachments,
+  localPreviewUrl,
+  toolTitle,
+  toolSummary,
+  toolPreview,
+  isThreadBusy,
+  summarizeApproval,
+  permissionOptions,
+  currentPermissionOption,
+  renderRateLimit,
+  formatAccount,
+  formatPermission,
+  pathBasename,
+  isImagePath,
+};
