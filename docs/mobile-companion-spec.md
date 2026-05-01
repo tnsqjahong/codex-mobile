@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build a mobile web app/PWA that lets a user connect their phone to the Codex runtime already running on their computer. The phone should feel like a lightweight Codex App surface: browse projects, open existing Codex threads, read chat history, send messages, stream agent progress, and handle approvals.
+Build a mobile web app that lets a user connect their phone to the Codex runtime already running on their computer. The phone should feel like a lightweight Codex App surface: browse projects, open existing Codex threads, read chat history, send messages, stream agent progress, and handle approvals.
 
 The mobile client should not mirror the desktop screen. It should use the same Codex session/thread layer that Codex Desktop, Codex CLI, and IDE clients already share.
 
@@ -33,7 +33,7 @@ Do not build the mobile app by reading SQLite/JSONL directly unless App Server i
 Preferred data path:
 
 ```text
-Mobile PWA
+Mobile Web App
   -> Desktop Bridge HTTP/WebSocket API
   -> codex app-server JSON-RPC
   -> Codex local state and session rollouts
@@ -95,6 +95,7 @@ Bridge-level Git helpers for desktop parity:
 - `POST /api/threads/:threadId/git/checkout`: checkout or create a branch in the thread `cwd`.
 - `POST /api/threads/:threadId/git/commit`: stage and commit current working-tree changes after explicit mobile confirmation.
 - `GET /api/threads/:threadId/token-usage`: return the latest cached token usage snapshot observed for the thread.
+- `POST /api/uploads`: stage mobile-selected files into a desktop temp directory before sending a turn.
 
 Useful events/items:
 
@@ -420,7 +421,7 @@ Response shape:
   },
   "files": [
     {
-      "path": "public/app.js",
+      "path": "src/client/App.tsx",
       "status": " M",
       "additions": 23,
       "deletions": 3,
@@ -436,7 +437,7 @@ Response shape:
 
 ### `POST /threads/:threadId/actions`
 
-Runs Desktop-style thread actions.
+Runs advanced thread actions. These remain available at the bridge layer, but the mobile UI keeps them out of the default chat surface.
 
 Supported actions:
 
@@ -472,6 +473,14 @@ Request:
 ```json
 {
   "text": "계속 진행해줘",
+  "attachments": [
+    {
+      "name": "screenshot.png",
+      "path": "/tmp/codex-mobile-uploads/.../screenshot.png",
+      "mime": "image/png",
+      "isImage": true
+    }
+  ],
   "model": "gpt-5.5",
   "effort": "high"
 }
@@ -489,10 +498,15 @@ Bridge implementation:
     "threadId": "<threadId>",
     "model": "gpt-5.5",
     "effort": "high",
-    "input": [{ "type": "text", "text": "<message>" }]
+    "input": [
+      { "type": "text", "text": "<message>" },
+      { "type": "localImage", "path": "/tmp/codex-mobile-uploads/.../screenshot.png" }
+    ]
   }
 }
 ```
+
+General files are staged on the desktop and appended to the turn as text with their local paths, because current `turn/start` user input supports text, image URL, `localImage`, skill, and mention inputs but not a generic file input.
 
 Response:
 
@@ -545,12 +559,12 @@ Server message types:
 - `approvalRequested`
 - `error`
 
-## Mobile PWA
+## Mobile Web App
 
 Implementation:
 
-- Dependency-free PWA shell.
-- PWA manifest + service worker.
+- Vite + React + TypeScript/TSX web shell.
+- Browser-session notifications where the browser allows them.
 - Lightweight in-memory state for HTTP and live thread events.
 
 Primary views:
@@ -570,12 +584,11 @@ Primary views:
 3. Thread Detail
    - chat timeline.
    - compact command/file cards.
-   - branch, model, reasoning effort, and permission summary.
+   - branch, combined model/reasoning menu, and permission menu.
    - changes tab with file list, counts, and tracked unified diffs.
    - message input.
-   - stop button when active.
+   - compact token usage dial in the composer.
    - approval cards.
-   - thread actions: rename, fork, compact, rollback, archive.
 
 4. Settings
    - paired desktop.
@@ -583,20 +596,19 @@ Primary views:
    - bridge status.
    - account, usage, plugins, skills, apps, MCP servers, automations.
 
-## QR And Installation UX
+## QR And Web UX
 
 What is possible:
 
 - Desktop bridge can render a real QR code containing the pairing URL.
 - Scanning the QR opens the mobile web app with `?pair=<code>`.
-- Android Chromium browsers can show a PWA install prompt after the page satisfies installability rules and after a user gesture.
-- iOS can install a PWA through Safari's Share menu and Add to Home Screen flow.
+- The mobile experience runs as a browser web app for the current desktop session.
 
-What is not possible for the PWA route:
+What is intentionally out of scope:
 
 - A QR scan cannot silently auto-install a web app.
 - A website cannot force an app download/install without the user's browser or OS confirmation.
-- iOS Chrome/Edge cannot trigger PWA installation directly; the practical path is Safari plus Add to Home Screen.
+- App install prompts are not shown because local-session tunnel URLs are temporary.
 
 Recommended product UX:
 
@@ -606,9 +618,7 @@ Recommended product UX:
 4. Only after desktop setup is ready, desktop companion shows a large local QR code.
 5. Desktop companion warms Codex App Server and the project/thread index while the QR is visible.
 6. Phone camera opens the temporary pairing URL for this desktop session.
-7. Mobile PWA completes pairing and opens the Codex workspace shell.
-8. If supported, show an Install button that calls the browser install prompt.
-9. Otherwise show a compact platform-specific install hint in settings.
+7. Mobile browser completes pairing and opens the Codex workspace shell.
 
 Session notification scope:
 
@@ -689,7 +699,7 @@ Current status:
 - Verified `thread/list`, project grouping, thread list, `thread/read`, `model/list`, `config/read`, thread context, Git changes, thread search, and settings bundle through the bridge.
 - Message send and live delta streaming are wired, but should be tested against a disposable thread before being treated as production-safe.
 
-### Phase 2: Mobile PWA MVP
+### Phase 2: Mobile Web MVP
 
 Deliverable:
 
@@ -740,7 +750,7 @@ Acceptance:
 Deliverable:
 
 - One command to run bridge and web app locally.
-- PWA install metadata.
+- TypeScript/TSX mobile client build.
 - Optional macOS LaunchAgent/tray wrapper.
 
 Acceptance:
@@ -751,7 +761,6 @@ Acceptance:
 
 - Whether to use `codex app-server proxy --sock` to attach to an already-running Desktop App app-server process, or always spawn our own app-server process.
 - Whether Desktop App live refreshes immediately when mobile updates a thread, or only after its own polling/reload. This is not a blocker because the shared local state updates correctly.
-- Whether mobile should support image/file attachments in the first release.
 - Whether plugin install/uninstall, automation create/update/delete, and account logout should be allowed from mobile or limited to read-only settings for safety.
 
 ## Immediate Next Development Tasks

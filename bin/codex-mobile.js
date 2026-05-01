@@ -7,12 +7,14 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const execFile = promisify(execFileCallback);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const entryFile = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(entryFile);
 const rootDir = path.resolve(__dirname, "..");
 const args = process.argv.slice(2);
 const port = Number(process.env.PORT || 8787);
 const localMode = args.includes("--local");
 const openBrowser = !args.includes("--no-open");
+const backgroundMode = args.includes("--background");
 const desktopUrl = `http://127.0.0.1:${port}`;
 const localLanUrl = `http://${getLanAddress()}:${port}`;
 const targetUrl = `http://127.0.0.1:${port}`;
@@ -21,14 +23,20 @@ let publicUrl = process.env.PUBLIC_URL?.replace(/\/$/, "") || null;
 let tunnel = null;
 
 if (args.includes("--help")) {
-  console.log("Usage: codex-mobile [--no-open] [--local]");
+  console.log("Usage: codex-mobile [--background] [--foreground] [--no-open] [--local]");
+  process.exit(0);
+}
+
+if (backgroundMode && process.env.CODEX_MOBILE_FOREGROUND !== "1") {
+  await startBackgroundCompanion();
   process.exit(0);
 }
 
 const bridgeWasRunning = await isBridgeRunning();
 if (!bridgeWasRunning) {
-  children.push(startBridge());
-  await waitForBridge();
+  const bridge = startBridge();
+  children.push(bridge);
+  await waitForBridge(bridge);
 }
 
 if (!publicUrl && !localMode) {
@@ -66,6 +74,34 @@ function startBridge() {
     if (!process.exitCode) process.exitCode = code ?? (signal ? 1 : 0);
   });
   return child;
+}
+
+async function startBackgroundCompanion() {
+  const runningHealth = await getBridgeHealth();
+  const runningUrl = runningHealth?.bridgeUrl || "";
+  const runningUrlReady = publicUrl || localMode;
+  if (runningHealth?.ok && runningUrlReady) {
+    if (publicUrl) await setPublicUrl(publicUrl).catch(() => {});
+    if (openBrowser) await openUrl(desktopUrl);
+    printReadyUrls("already running", publicUrl || runningUrl || desktopUrl);
+    return;
+  }
+  const childArgs = [
+    entryFile,
+    ...args.filter((arg) => arg !== "--background"),
+    "--no-open",
+  ];
+  const child = spawn(process.execPath, childArgs, {
+    cwd: rootDir,
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, CODEX_MOBILE_FOREGROUND: "1" },
+  });
+  child.unref();
+  await waitForBridge(child);
+  const mobileUrl = await waitForMobileUrl(child, runningUrl);
+  if (openBrowser) await openUrl(desktopUrl);
+  printReadyUrls("running in background", mobileUrl || desktopUrl);
 }
 
 async function startRemoteTunnel(target) {
@@ -152,21 +188,53 @@ function firstUsableAddress(entries = []) {
 }
 
 async function isBridgeRunning() {
+  return Boolean(await getBridgeHealth());
+}
+
+async function getBridgeHealth() {
   try {
     const health = await requestJson(`${desktopUrl}/api/health`, 600);
-    return Boolean(health.ok);
+    return health?.ok ? health : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-async function waitForBridge() {
+async function waitForBridge(child = null) {
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
     if (await isBridgeRunning()) return;
+    if (child?.exitCode !== null) {
+      throw new Error(`Codex Mobile Companion exited before it could start (exit ${child.exitCode})`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 180));
   }
   throw new Error("Timed out waiting for Codex Mobile Companion to start");
+}
+
+async function waitForMobileUrl(child = null, previousUrl = "") {
+  if (publicUrl) return publicUrl;
+  if (localMode) {
+    const health = await getBridgeHealth();
+    return health?.bridgeUrl || localLanUrl;
+  }
+  const deadline = Date.now() + 35_000;
+  while (Date.now() < deadline) {
+    const health = await getBridgeHealth();
+    const bridgeUrl = health?.bridgeUrl || "";
+    if (bridgeUrl && bridgeUrl !== targetUrl && bridgeUrl !== previousUrl) return bridgeUrl;
+    if (child?.exitCode !== null) {
+      throw new Error("Codex Mobile Companion exited before it published a mobile URL");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  throw new Error("Timed out waiting for mobile QR URL");
+}
+
+function printReadyUrls(status, mobileUrl) {
+  console.log(`Codex Mobile Companion ${status}`);
+  console.log(`Desktop pairing page: ${desktopUrl}`);
+  console.log(`Mobile QR URL: ${mobileUrl}`);
 }
 
 function requestJson(url, timeout) {

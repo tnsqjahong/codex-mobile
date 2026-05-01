@@ -3,6 +3,7 @@ const LOW_ECC_CODEWORDS = {
   2: { data: 34, ecc: 10 },
   3: { data: 55, ecc: 15 },
   4: { data: 80, ecc: 20 },
+  5: { data: 108, ecc: 26 },
 };
 
 const ALIGNMENT_POSITIONS = {
@@ -10,6 +11,7 @@ const ALIGNMENT_POSITIONS = {
   2: [6, 18],
   3: [6, 22],
   4: [6, 26],
+  5: [6, 30],
 };
 
 const GF_EXP = new Array(512);

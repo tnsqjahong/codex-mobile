@@ -14,6 +14,7 @@ const execFile = promisify(execFileCallback);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "../..");
 const publicDir = path.join(rootDir, "public");
+const distDir = path.join(rootDir, "dist");
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || "127.0.0.1";
 
@@ -25,7 +26,11 @@ const activeTurns = new Map();
 const diffSnapshots = new Map();
 const tokenUsageSnapshots = new Map();
 const responseCache = new Map();
+const localPreviewFiles = new Map();
 const CACHE_TTL_MS = 120_000;
+const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
+const UPLOAD_ROOT = path.join(os.tmpdir(), "codex-mobile-uploads");
+const PREVIEW_TTL_MS = 12 * 60 * 60 * 1000;
 let publicBaseUrlOverride = process.env.PUBLIC_URL?.replace(/\/$/, "") || null;
 let loginProcess = null;
 let loginFlow = {
@@ -121,7 +126,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/desktop/public-url") {
-    if (!isLoopbackRequest(req)) {
+    if (!isDesktopBrowserRequest(req)) {
       sendJson(res, 403, { error: "Public URL can only be updated from this computer" });
       return;
     }
@@ -132,7 +137,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/desktop/login/start") {
-    if (!isLoopbackRequest(req)) {
+    if (!isDesktopBrowserRequest(req)) {
       sendJson(res, 403, { error: "Desktop login can only be started from this computer" });
       return;
     }
@@ -146,7 +151,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/desktop/login/cancel") {
-    if (!isLoopbackRequest(req)) {
+    if (!isDesktopBrowserRequest(req)) {
       sendJson(res, 403, { error: "Desktop login can only be cancelled from this computer" });
       return;
     }
@@ -156,7 +161,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/pair/start") {
-    if (!isLoopbackRequest(req)) {
+    if (!isDesktopBrowserRequest(req)) {
       sendJson(res, 403, { error: "Pairing QR can only be created from this computer" });
       return;
     }
@@ -200,8 +205,19 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (!isAuthorized(req)) {
+  if (!isAuthorized(req, url)) {
     sendJson(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/local-file") {
+    await sendLocalImage(res, url.searchParams.get("id"));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/uploads") {
+    const body = await readJson(req, { maxBytes: MAX_UPLOAD_BYTES * 2 });
+    sendJson(res, 200, { files: await saveUploads(body.files || []) });
     return;
   }
 
@@ -226,17 +242,25 @@ async function handleApi(req, res, url) {
       ephemeral: false,
     };
     const result = await rpc.request("thread/start", threadParams);
-    const threadId = result.thread?.id;
-    if (threadId && body.text?.trim()) {
+    const createdThread = normalizeThreadStartResult(result, body.cwd);
+    const threadId = createdThread?.id;
+    let startedTurn = null;
+    if (threadId && (body.text?.trim() || hasAttachments(body.attachments) || hasMentions(body.mentions))) {
       const turnParams = {
         threadId,
-        input: [{ type: "text", text: body.text }],
+        input: buildTurnInput(body.text, body.attachments, body.mentions, body.cwd),
       };
       if (body.model) turnParams.model = String(body.model);
       if (body.effort) turnParams.effort = String(body.effort);
-      await rpc.request("turn/start", turnParams);
+      if (body.approvalPolicy) turnParams.approvalPolicy = body.approvalPolicy;
+      startedTurn = await rpc.request("turn/start", turnParams);
     }
-    sendJson(res, 200, result);
+    sendJson(res, 200, {
+      ...(result || {}),
+      thread: createdThread,
+      threadId,
+      startedTurn,
+    });
     return;
   }
 
@@ -309,6 +333,14 @@ async function handleApi(req, res, url) {
     const skills = await rpc.request("skills/list", { cwds: cwd ? [cwd] : [], forceReload: false })
       .catch((error) => ({ error: cleanCommandOutput(error.message || error), data: [] }));
     sendJson(res, 200, { data: flattenSkills(summarizeSkills(skills)) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/mentions") {
+    await ensureAppServerStarted();
+    const cwd = url.searchParams.get("cwd");
+    const query = url.searchParams.get("query") || "";
+    sendJson(res, 200, await searchMentions(cwd, query));
     return;
   }
 
@@ -412,14 +444,15 @@ async function handleApi(req, res, url) {
     invalidateResponseCache();
     const threadId = decodeURIComponent(messageMatch[1]);
     const body = await readJson(req);
-    if (!body.text?.trim()) {
-      sendJson(res, 400, { error: "Missing text" });
+    if (!body.text?.trim() && !hasAttachments(body.attachments) && !hasMentions(body.mentions)) {
+      sendJson(res, 400, { error: "Missing message" });
       return;
     }
     await rpc.request("thread/resume", { threadId });
+    const threadResult = await rpc.request("thread/read", { threadId, includeTurns: false });
     const params = {
       threadId,
-      input: [{ type: "text", text: body.text }],
+      input: buildTurnInput(body.text, body.attachments, body.mentions, threadResult.thread?.cwd),
     };
     if (body.model) params.model = String(body.model);
     if (body.effort) params.effort = String(body.effort);
@@ -434,7 +467,11 @@ async function handleApi(req, res, url) {
     await ensureAppServerStarted();
     const threadId = decodeURIComponent(interruptMatch[1]);
     const body = await readJson(req).catch(() => ({}));
-    const turnId = body.turnId || activeTurns.get(threadId);
+    let turnId = body.turnId || activeTurns.get(threadId);
+    if (!turnId) {
+      const threadResult = await rpc.request("thread/read", { threadId, includeTurns: true }).catch(() => null);
+      turnId = findActiveTurnId(threadResult?.thread);
+    }
     if (!turnId) {
       sendJson(res, 409, { error: "No active turn for thread" });
       return;
@@ -719,6 +756,23 @@ function summarizeThread(thread) {
   };
 }
 
+function normalizeThreadStartResult(result, fallbackCwd = null) {
+  const candidates = [
+    result?.thread,
+    result?.data?.thread,
+    result?.data,
+    result,
+  ];
+  const thread = candidates.find((candidate) => candidate && typeof candidate === "object" && candidate.id);
+  const threadId = thread?.id || result?.threadId || result?.data?.threadId || result?.data?.id || result?.id;
+  if (!threadId) return null;
+  return {
+    ...(thread || {}),
+    id: threadId,
+    cwd: thread?.cwd || fallbackCwd || null,
+  };
+}
+
 function mapApprovalDecision(decision, remember) {
   const mapped = decision === "allow" ? (remember ? "acceptForSession" : "accept") : decision === "cancel" ? "cancel" : "decline";
   return { decision: mapped };
@@ -748,14 +802,25 @@ function trackTurn(message) {
   }
 }
 
+function findActiveTurnId(thread) {
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    const status = String(turn?.status || "").toLowerCase();
+    if (/(running|working|queued|pending|active)/.test(status)) return turn.id;
+  }
+  return null;
+}
+
 function extractThreadId(message) {
   const params = message.params || {};
   return params.threadId || params.thread?.id || params.item?.threadId || null;
 }
 
-function isAuthorized(req) {
+function isAuthorized(req, url = null) {
   const auth = req.headers.authorization || "";
-  return isValidToken(auth.startsWith("Bearer ") ? auth.slice(7) : null);
+  const headerToken = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  return isValidToken(headerToken || url?.searchParams?.get("token"));
 }
 
 function isValidToken(token) {
@@ -768,11 +833,251 @@ function isLoopbackRequest(req) {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
-async function readJson(req) {
+function isDesktopBrowserRequest(req) {
+  if (!isLoopbackRequest(req)) return false;
+  const hostname = String(req.headers.host || "").split(":")[0].replace(/^\[|\]$/g, "");
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+}
+
+async function readJson(req, options = {}) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let total = 0;
+  const maxBytes = options.maxBytes || 2 * 1024 * 1024;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > maxBytes) throw new Error("Request body too large");
+    chunks.push(chunk);
+  }
   if (!chunks.length) return {};
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+async function saveUploads(files) {
+  if (!Array.isArray(files)) throw new Error("Invalid upload payload");
+  if (files.length > 10) throw new Error("Upload at most 10 files at once");
+  const dir = path.join(UPLOAD_ROOT, `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`);
+  await fs.mkdir(dir, { recursive: true });
+  let totalBytes = 0;
+  const saved = [];
+  for (const [index, file] of files.entries()) {
+    const payload = decodeUploadData(file.data);
+    totalBytes += payload.length;
+    if (totalBytes > MAX_UPLOAD_BYTES) throw new Error("Attachments are too large");
+    const name = sanitizeUploadName(file.name || `attachment-${index + 1}`);
+    const diskName = `${String(index + 1).padStart(2, "0")}-${name}`;
+    const target = path.join(dir, diskName);
+    await fs.writeFile(target, payload);
+    const id = crypto.randomUUID();
+    const mime = String(file.mime || "application/octet-stream");
+    const isImage = isImageAttachment(mime, name);
+    if (isImage) {
+      localPreviewFiles.set(id, {
+        path: target,
+        expiresAt: Date.now() + PREVIEW_TTL_MS,
+      });
+    }
+    saved.push({
+      id,
+      name,
+      path: target,
+      mime,
+      size: payload.length,
+      isImage,
+    });
+  }
+  return saved;
+}
+
+async function sendLocalImage(res, previewId) {
+  const preview = localPreviewFiles.get(String(previewId || ""));
+  if (!preview || preview.expiresAt < Date.now()) {
+    if (preview) localPreviewFiles.delete(String(previewId || ""));
+    sendJson(res, 404, { error: "Image preview not found" });
+    return;
+  }
+  const resolved = path.resolve(preview.path);
+  if (!isImageFile(resolved)) {
+    sendJson(res, 415, { error: "Only local image previews are supported" });
+    return;
+  }
+  const stat = await fs.stat(resolved);
+  if (!stat.isFile() || stat.size > MAX_UPLOAD_BYTES) {
+    sendJson(res, 413, { error: "Image preview is too large" });
+    return;
+  }
+  const data = await fs.readFile(resolved);
+  res.writeHead(200, {
+    "content-type": contentType(resolved),
+    "cache-control": "private, max-age=300",
+  });
+  res.end(data);
+}
+
+function decodeUploadData(data) {
+  if (typeof data !== "string") throw new Error("Missing upload data");
+  const match = data.match(/^data:([^;]+);base64,(.*)$/s);
+  const encoded = match ? match[2] : data;
+  return Buffer.from(encoded, "base64");
+}
+
+function sanitizeUploadName(name) {
+  const base = path.basename(String(name)).replace(/[^\w .()-]/g, "_").replace(/\s+/g, " ").trim();
+  return base || "attachment";
+}
+
+function hasAttachments(attachments) {
+  return Array.isArray(attachments) && attachments.some((attachment) => normalizeAttachment(attachment));
+}
+
+function hasMentions(mentions) {
+  return Array.isArray(mentions) && mentions.some((mention) => mention?.kind || mention?.type);
+}
+
+function buildTurnInput(text, attachments = [], mentions = [], mentionRoot = null) {
+  const input = [];
+  const trimmed = String(text || "").trim();
+  if (trimmed) input.push({ type: "text", text: trimmed });
+
+  for (const mention of mentions || []) {
+    const normalized = normalizeMention(mention, mentionRoot);
+    if (!normalized) continue;
+    input.push(normalized);
+  }
+
+  const fileNotes = [];
+  for (const attachment of attachments || []) {
+    const file = normalizeAttachment(attachment);
+    if (!file) continue;
+    if (file.isImage) {
+      input.push({ type: "localImage", path: file.path });
+      continue;
+    }
+    fileNotes.push(`- ${file.name}: ${file.path}`);
+  }
+
+  if (fileNotes.length) {
+    input.push({
+      type: "text",
+      text: `Attached files on this computer:\n${fileNotes.join("\n")}`,
+    });
+  }
+  return input;
+}
+
+function normalizeMention(mention, allowedRoot) {
+  const kind = String(mention?.kind || mention?.type || "").toLowerCase();
+  if (kind === "skill") {
+    const name = String(mention.name || "").trim();
+    if (!name) return null;
+    return { type: "skill", name, path: String(mention.path || mention.source || "") };
+  }
+  if (kind !== "file" && kind !== "mention") return null;
+  const rawPath = String(mention.path || mention.absolutePath || "").trim();
+  if (!rawPath) return null;
+  const resolved = path.resolve(rawPath);
+  const root = path.resolve(allowedRoot || mention.root || path.dirname(resolved));
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) return null;
+  return {
+    type: "mention",
+    name: sanitizeUploadName(mention.name || path.basename(resolved)),
+    path: resolved,
+  };
+}
+
+async function searchMentions(cwd, query) {
+  const roots = cwd ? [cwd] : [];
+  const [files, agents, plugins, apps] = await Promise.all([
+    roots.length
+      ? rpc.request("fuzzyFileSearch", { query, roots, cancellationToken: null })
+        .catch((error) => ({ error: cleanCommandOutput(error.message || error), files: [] }))
+      : Promise.resolve({ files: [] }),
+    listLocalAgents(query),
+    cachedResponse(`mention-plugins:${cwd || ""}`, () => rpc.request("plugin/list", { cwds: roots.length ? roots : null })
+      .catch((error) => ({ error: cleanCommandOutput(error.message || error), marketplaces: [] }))),
+    cachedResponse("mention-apps", () => rpc.request("app/list", { limit: 100 })
+      .catch((error) => ({ error: cleanCommandOutput(error.message || error), data: [] }))),
+  ]);
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const filterText = (value) => !normalizedQuery || String(value || "").toLowerCase().includes(normalizedQuery);
+  const flattenedPlugins = collectPlugins(plugins)
+    .filter((plugin) => filterText(`${plugin.name || ""} ${plugin.interface?.displayName || ""} ${plugin.interface?.description || ""}`))
+    .slice(0, 8);
+  const summarizedApps = summarizeApps(apps).data
+    .filter((app) => filterText(`${app.name || ""} ${app.description || ""}`))
+    .slice(0, 8);
+
+  return {
+    files: (files.files || []).slice(0, 12).map((file) => ({
+      root: file.root,
+      path: file.path,
+      absolutePath: path.join(file.root, file.path),
+      name: file.file_name || path.basename(file.path),
+      matchType: file.match_type,
+      score: file.score,
+    })),
+    agents,
+    plugins: flattenedPlugins.map((plugin) => ({
+      id: plugin.id || plugin.name,
+      name: plugin.name || plugin.id,
+      displayName: plugin.interface?.displayName || plugin.displayName || plugin.name || plugin.id,
+      description: plugin.interface?.description || plugin.description || null,
+    })),
+    apps: summarizedApps,
+  };
+}
+
+async function listLocalAgents(query = "") {
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const candidates = [
+    path.join(codexHome, "agents"),
+    path.join(os.homedir(), ".agents", "agents"),
+  ];
+  const agents = [];
+  for (const dir of candidates) {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".toml")) continue;
+      const filePath = path.join(dir, entry.name);
+      const text = await fs.readFile(filePath, "utf8").catch(() => "");
+      const name = extractTomlString(text, "name") || entry.name.replace(/\.toml$/, "");
+      const description = extractTomlString(text, "description") || "";
+      const model = extractTomlString(text, "model") || "";
+      agents.push({ name, description, model, path: filePath });
+    }
+  }
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  return agents
+    .filter((agent) => !normalizedQuery || `${agent.name} ${agent.description}`.toLowerCase().includes(normalizedQuery))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, 12);
+}
+
+function collectPlugins(plugins) {
+  return (plugins?.marketplaces || []).flatMap((marketplace) => marketplace.plugins || []);
+}
+
+function normalizeAttachment(attachment) {
+  if (!attachment?.path) return null;
+  const resolved = path.resolve(String(attachment.path));
+  const root = path.resolve(UPLOAD_ROOT);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) return null;
+  const name = sanitizeUploadName(attachment.name || path.basename(resolved));
+  const mime = String(attachment.mime || "");
+  return {
+    name,
+    path: resolved,
+    mime,
+    isImage: Boolean(attachment.isImage) || isImageAttachment(mime, name),
+  };
+}
+
+function isImageAttachment(mime, name) {
+  return String(mime || "").startsWith("image/") || /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(String(name || ""));
+}
+
+function isImageFile(filePath) {
+  return /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(String(filePath || ""));
 }
 
 function sendJson(res, status, value) {
@@ -787,8 +1092,9 @@ function sendJson(res, status, value) {
 async function serveStatic(req, res, url) {
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === "/") pathname = "/index.html";
-  const target = path.normalize(path.join(publicDir, pathname));
-  if (!target.startsWith(publicDir)) {
+  const staticDir = await directoryExists(distDir) ? distDir : publicDir;
+  const target = path.normalize(path.join(staticDir, pathname));
+  if (!target.startsWith(staticDir)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
@@ -798,18 +1104,30 @@ async function serveStatic(req, res, url) {
     res.writeHead(200, { "content-type": contentType(target) });
     res.end(data);
   } catch {
-    const data = await fs.readFile(path.join(publicDir, "index.html"));
+    const data = await fs.readFile(path.join(staticDir, "index.html"));
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(data);
   }
 }
 
+async function directoryExists(dir) {
+  return fs.stat(dir).then((stat) => stat.isDirectory()).catch(() => false);
+}
+
 function contentType(file) {
-  if (file.endsWith(".html")) return "text/html; charset=utf-8";
-  if (file.endsWith(".css")) return "text/css; charset=utf-8";
-  if (file.endsWith(".js")) return "text/javascript; charset=utf-8";
-  if (file.endsWith(".json")) return "application/json; charset=utf-8";
-  if (file.endsWith(".svg")) return "image/svg+xml";
+  const lower = String(file || "").toLowerCase();
+  if (lower.endsWith(".html")) return "text/html; charset=utf-8";
+  if (lower.endsWith(".css")) return "text/css; charset=utf-8";
+  if (lower.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (lower.endsWith(".mjs")) return "text/javascript; charset=utf-8";
+  if (lower.endsWith(".json")) return "application/json; charset=utf-8";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".heic") || lower.endsWith(".heif")) return "image/heic";
+  if (lower.endsWith(".ico")) return "image/x-icon";
   return "application/octet-stream";
 }
 

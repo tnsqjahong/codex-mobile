@@ -8,13 +8,13 @@ This project intentionally uses **local-session mode** only:
 - The QR code pairs a phone for the lifetime of the desktop companion process.
 - If the desktop companion/tunnel restarts, the user scans a fresh QR.
 - No hosted relay, paid domain, ngrok account, or long-lived remote service is required.
-- Notifications are session notifications: they work while the mobile PWA/browser remains connected to the desktop bridge.
+- Notifications are session notifications: they work while the mobile browser remains connected to the desktop bridge.
 
-The bridge starts `codex app-server` over stdio and exposes a small HTTP/WebSocket API for the mobile UI. It does not read Codex SQLite/JSONL state directly.
+The bridge starts `codex app-server` over stdio and exposes a small HTTP/WebSocket API for the mobile UI. It does not read Codex SQLite/JSONL state directly. The mobile client is built with Vite + React + TypeScript/TSX and served by the bridge from `dist/`.
 
 ## Run
 
-First, check your desktop setup:
+First, install dependencies and check your desktop setup:
 
 ```sh
 npm run setup
@@ -26,7 +26,13 @@ Then start the local companion:
 npm start
 ```
 
-`npm start` starts the bridge, creates a temporary HTTPS remote tunnel when possible, opens the desktop pairing window, checks Codex CLI/login status there, warms Codex App Server, and shows a QR that can be opened from mobile data.
+`npm start` builds the mobile client, starts the bridge in the background, creates a temporary HTTPS remote tunnel when possible, opens the desktop pairing window, checks Codex CLI/login status there, warms Codex App Server, and shows a QR that can be opened from mobile data. After the pairing window opens, the terminal that launched `npm start` can be closed.
+
+For foreground logs while developing:
+
+```sh
+npm run start:foreground
+```
 
 Later, when installed globally, the same launcher is available as:
 
@@ -70,6 +76,7 @@ Expected result: recent Codex threads are printed, including threads visible in 
 - `POST /api/desktop/login/cancel`
 - `POST /api/pair/start`
 - `POST /api/pair/complete`
+- `POST /api/uploads`
 - `GET /api/projects`
 - `POST /api/threads`
 - `GET /api/models`
@@ -101,17 +108,18 @@ Implemented:
 - Thread list and thread detail reads.
 - Short-lived pairing code and bearer token.
 - Local QR SVG generation for pairing URLs.
-- Mobile PWA shell with project/thread/detail views.
-- Desktop-like thread controls for branch switching/creation, model, reasoning effort, permission summary, chat, and changes.
-- Live thread token usage meter backed by App Server `thread/tokenUsage/updated` events.
+- Vite + React + TypeScript/TSX mobile web shell with project/thread/detail views.
+- Desktop-like composer controls for branch switching/creation, combined model/reasoning selection, permission menu, chat, and changes.
+- Compact composer token usage dial backed by App Server `thread/tokenUsage/updated` events.
 - Working-tree changes endpoint backed by Git status/diff data.
 - Commit-all action for current working-tree changes from the mobile changes panel.
-- New thread creation, project/thread search UI, stop button, and thread actions for rename, fork, compact, rollback, and archive.
+- New thread creation and project/thread search UI.
 - Settings surface for account, rate limits, runtime config, plugins, skills, apps, MCP servers, and automations.
-- Desktop-style `$skill` picker in the chat composer, backed by installed skills from App Server.
-- PWA install CTA for Android Chromium and in-app Home Screen guidance for iOS Safari.
+- Desktop-style `$skill`, `@context`, and `/command` composer pickers backed by App Server skills, fuzzy file search, apps, plugins, and thread actions.
+- Mobile image/file attachments in the chat composer. Images are sent as Codex `localImage` inputs; files are staged on the desktop and referenced by local path.
+- Web-only mobile experience opened from the pairing QR; install prompts are intentionally not shown.
 - Message send with model/effort overrides, interrupt, approval response, and WebSocket event handling hooks.
-- Session notifications for approval requests and completed Codex turns while the mobile PWA/browser is connected.
+- Session notifications for approval requests and completed Codex turns while the mobile browser is connected.
 - QR-time Codex App Server and project-cache prewarm so mobile opens quickly after scanning.
 
 Known next work:
@@ -120,11 +128,9 @@ Known next work:
 - Harden approval response shapes for `item/permissions/requestApproval`.
 - Add paired-device revocation, desktop-side pairing confirmation, and plugin/automation mutation UI.
 
-## Install Reality
+## Web-Only Reality
 
-The QR code can open the paired mobile web app, but it cannot silently install it. Android Chromium can show a user-approved PWA install prompt. iOS requires Safari's Add to Home Screen flow for PWAs.
-
-Because the default tunnel is intentionally temporary, an installed PWA is tied to the current desktop session URL. After restarting the desktop companion, scan the new QR and install/open that session again if needed.
+The QR code opens the paired mobile web app in the browser. This project intentionally does not prompt users to install an app because the default tunnel URL is temporary and changes between desktop companion sessions.
 
 Closed-app push notifications are intentionally out of scope for local-session mode because mobile browsers require a stable origin plus Web Push subscription storage for that. This project only targets notifications while the paired mobile app is connected during the current desktop session.
 
@@ -139,7 +145,7 @@ npm run setup
 npm start
 ```
 
-The setup command requires no npm install because the project has no external dependencies. A packaged desktop wrapper can later run the same checks and bridge without exposing Terminal.
+The setup command installs the TypeScript/Vite client dependencies and checks the local Codex setup. A packaged desktop wrapper can later run the same checks and bridge without exposing Terminal.
 
 In the packaged desktop app, users should not run `codex login --device-auth` themselves. The app should start that flow internally when needed, wait for the browser-based OpenAI login to complete, then enable the QR button.
 

@@ -8,14 +8,25 @@
     "codex-mobile": "./bin/codex-mobile.js"
   },
   "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "dev": "vite --host 127.0.0.1",
     "cli": "node bin/codex-mobile.js",
-    "start": "node bin/codex-mobile.js",
-    "serve": "node src/bridge/server.js",
+    "start": "npm run build && node bin/codex-mobile.js --background",
+    "start:foreground": "npm run build && node bin/codex-mobile.js",
+    "serve": "npm run build && node src/bridge/server.js",
     "doctor": "node src/bridge/doctor.js",
-    "setup": "npm run doctor",
+    "setup": "npm install && npm run doctor",
     "probe": "node src/bridge/probe.js"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10"
   }
 }
