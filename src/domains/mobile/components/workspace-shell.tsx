@@ -43,6 +43,7 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
           ? "lg:grid-cols-[minmax(0,1fr)]"
           : "lg:grid-cols-[320px_minmax(0,1fr)]",
       )}
+      style={{ height: "var(--app-height, 100dvh)", maxWidth: "var(--app-width, 100vw)" }}
     >
       <Sidebar state={state} desktopCollapsed={desktopSidebarCollapsed} />
 

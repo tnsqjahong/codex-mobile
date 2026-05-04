@@ -54,7 +54,7 @@ export const state: AnyRecord = {
   pairing: null,
   pairingError: "",
   notificationsEnabled: "Notification" in window && Notification.permission === "granted" && localStorage.getItem("codexMobileNotifications") === "enabled",
-  sidebarOpen: window.matchMedia("(min-width: 900px)").matches,
+  sidebarOpen: window.matchMedia("(min-width: 1024px)").matches,
   threadsLoading: false,
   threadRefreshTimer: null,
   threadRefreshAttempts: 0,
@@ -70,6 +70,7 @@ export const state: AnyRecord = {
 const app = document.querySelector("#app") as HTMLElement;
 
 const listeners = new Set<() => void>();
+let viewportListenersInstalled = false;
 
 export function subscribe(listener: () => void) {
   listeners.add(listener);
@@ -92,6 +93,7 @@ function emit() {
 }
 
 export async function init() {
+  installViewportListeners();
   await removeLegacyWebAppCache();
   const pair = new URL(location.href).searchParams.get("pair");
   if (pair && !state.token) {
@@ -105,6 +107,33 @@ export async function init() {
     return;
   }
   await loadProjects();
+}
+
+function installViewportListeners() {
+  if (viewportListenersInstalled) return;
+  viewportListenersInstalled = true;
+  const wideQuery = window.matchMedia("(min-width: 1024px)");
+  const syncViewport = () => {
+    const visualViewport = window.visualViewport;
+    const width = Math.max(320, Math.floor(visualViewport?.width || window.innerWidth || document.documentElement.clientWidth));
+    const height = Math.max(320, Math.floor(visualViewport?.height || window.innerHeight || document.documentElement.clientHeight));
+    document.documentElement.style.setProperty("--app-width", `${width}px`);
+    document.documentElement.style.setProperty("--app-height", `${height}px`);
+  };
+  const syncSidebar = () => {
+    const shouldOpen = wideQuery.matches;
+    if (state.sidebarOpen !== shouldOpen) {
+      state.sidebarOpen = shouldOpen;
+      emit();
+    }
+  };
+  syncViewport();
+  syncSidebar();
+  window.addEventListener("resize", syncViewport, { passive: true });
+  window.addEventListener("orientationchange", syncViewport, { passive: true });
+  window.visualViewport?.addEventListener("resize", syncViewport, { passive: true });
+  window.visualViewport?.addEventListener("scroll", syncViewport, { passive: true });
+  wideQuery.addEventListener("change", syncSidebar);
 }
 
 async function removeLegacyWebAppCache() {
@@ -2582,7 +2611,7 @@ function shell(title, subtitle, content, options: AnyRecord = {}) {
 }
 
 function isWideScreen() {
-  return window.matchMedia("(min-width: 900px)").matches;
+  return window.matchMedia("(min-width: 1024px)").matches;
 }
 
 async function fetchJson(url, options: AnyRecord = {}) {
@@ -2607,10 +2636,35 @@ async function fetchJson(url, options: AnyRecord = {}) {
 }
 
 function extractText(item) {
-  if (typeof item.text === "string") return item.text;
-  if (typeof item.message === "string") return item.message;
-  if (typeof item.content === "string") return item.content;
-  if (Array.isArray(item.content)) return item.content.map((part) => part.text || part.content || "").join("");
+  if (!item || typeof item !== "object") return "";
+  const directText = textFromValue(item.text) || textFromValue(item.message) || textFromValue(item.content);
+  if (directText) return directText;
+  const arrayText = [
+    item.content,
+    item.input,
+    item.parts,
+    item.messages,
+    item.output,
+  ].map(textFromValue).filter(Boolean).join("");
+  if (arrayText) return arrayText;
+  const nestedText = textFromValue(item.data) || textFromValue(item.payload) || textFromValue(item.params);
+  if (nestedText) return nestedText;
+  return "";
+}
+
+function textFromValue(value) {
+  if (typeof value === "string") return value;
+  if (!value) return "";
+  if (Array.isArray(value)) return value.map(textFromValue).filter(Boolean).join("");
+  if (typeof value !== "object") return "";
+  if (typeof value.text === "string") return value.text;
+  if (typeof value.content === "string") return value.content;
+  if (typeof value.value === "string") return value.value;
+  if (typeof value.markdown === "string") return value.markdown;
+  if (typeof value.message === "string") return value.message;
+  if (value.text && typeof value.text === "object") return textFromValue(value.text);
+  if (value.content && typeof value.content === "object") return textFromValue(value.content);
+  if (value.input && typeof value.input === "object") return textFromValue(value.input);
   return "";
 }
 

@@ -89,6 +89,7 @@ function MessageBubble({ role, item }: { role: "user" | "agent"; item: any }) {
   ])
 
   if (role === "user") {
+    if (!text?.trim() && !attachments.length) return null
     return (
       <div className="codex-fade-in rounded-lg bg-[var(--bubble-user)] px-4 py-3 text-[var(--ink)]">
         {text?.trim() ? (
@@ -107,6 +108,14 @@ function MessageBubble({ role, item }: { role: "user" | "agent"; item: any }) {
       {renderAttachments(attachments)}
     </div>
   )
+}
+
+function itemRole(item: any): "user" | "agent" | null {
+  const type = String(item?.type || item?.kind || item?.itemType || "").toLowerCase()
+  const role = String(item?.role || item?.author?.role || "").toLowerCase()
+  if (role === "user" || type === "usermessage" || type === "user_message" || type === "message/user") return "user"
+  if (role === "assistant" || role === "agent" || type === "agentmessage" || type === "agent_message" || type === "message/agent") return "agent"
+  return null
 }
 
 function ToolRow({ item }: { item: any }) {
@@ -230,8 +239,8 @@ function QueuedCard({ state }: { state: Record<string, any> }) {
 
 function itemNode(item: any) {
   const type = item.type || item.kind || "unknown"
-  if (type === "userMessage") return <MessageBubble role="user" item={item} />
-  if (type === "agentMessage") return <MessageBubble role="agent" item={item} />
+  const role = itemRole(item)
+  if (role) return <MessageBubble role={role} item={item} />
   if (type === "localImage" || type === "image" || type === "image_url") return <MessageBubble role="user" item={{ attachments: mobileSelectors.extractAttachments(item), text: "" }} />
   return <ToolRow item={item} />
 }
@@ -271,9 +280,10 @@ export function ChatPane({ state }: { state: Record<string, any> }) {
           <MessageBubble role="user" item={{ text: startPending.text, attachments: startPending.attachments }} />
         ) : null}
 
-        {items.map(({ key, item }) => (
-          <div key={key}>{itemNode(item)}</div>
-        ))}
+        {items.map(({ key, item }) => {
+          const node = itemNode(item)
+          return node ? <div key={key}>{node}</div> : null
+        })}
 
         {isBusy ? (
           <div className="codex-fade-in inline-flex items-center gap-2 self-start rounded-md px-2 py-1 text-[12.5px] text-[var(--muted-text)]">

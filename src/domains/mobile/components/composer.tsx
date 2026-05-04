@@ -25,7 +25,7 @@ export function Composer({ state }: { state: Record<string, any> }) {
   const composer = useComposer(state)
 
   return (
-    <div className="px-3 pb-[calc(env(safe-area-inset-bottom)+0.65rem)] pt-2">
+    <div className="w-full max-w-full px-3 pb-[calc(env(safe-area-inset-bottom)+0.65rem)] pt-2">
       {composer.attachments.length ? (
         <div className="mx-auto mb-1.5 flex w-full max-w-3xl flex-wrap gap-1.5">
           {composer.attachments.map((attachment: any) => (
@@ -61,7 +61,7 @@ export function Composer({ state }: { state: Record<string, any> }) {
 
         <div className="mt-1 flex min-w-0 flex-nowrap items-center justify-between gap-1.5 px-1.5">
           {/* left actions */}
-          <div className="flex min-w-0 items-center gap-1">
+          <div className="flex min-w-0 flex-1 items-center gap-1">
             <Button
               type="button"
               variant="ghost"
@@ -81,7 +81,7 @@ export function Composer({ state }: { state: Record<string, any> }) {
                   className="h-8 min-w-0 gap-1 rounded-md px-2 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--row-hover)]"
                 >
                   <Shield className="size-3.5 shrink-0 text-[var(--muted-text)]" />
-                  <span className="max-w-[8rem] truncate sm:max-w-none">{composer.permissionLabel}</span>
+                  <span className="max-w-[5.75rem] truncate min-[390px]:max-w-[8rem] sm:max-w-none">{composer.permissionLabel}</span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-52 rounded-md">
@@ -99,7 +99,7 @@ export function Composer({ state }: { state: Record<string, any> }) {
           </div>
 
           {/* right actions */}
-          <div className="flex shrink-0 items-center gap-1">
+          <div className="flex min-w-0 shrink-0 items-center gap-1">
             <span className="hidden items-center gap-1 rounded-full bg-[var(--canvas-soft)] px-2 py-0.5 text-[10.5px] font-medium tabular-nums text-[var(--muted-text)] sm:inline-flex">
               ctx {composer.tokenDial.percent}%
             </span>
@@ -112,7 +112,7 @@ export function Composer({ state }: { state: Record<string, any> }) {
                   className="h-8 min-w-0 gap-1 rounded-md px-2 text-[12.5px] font-medium text-[var(--ink)] hover:bg-[var(--row-hover)]"
                 >
                   <Brain className="size-3.5 shrink-0 text-[var(--muted-text)]" />
-                  <span className="max-w-[7rem] truncate sm:max-w-[10rem]">{composer.modelLabel}</span>
+                  <span className="max-w-[4.75rem] truncate min-[390px]:max-w-[7rem] sm:max-w-[10rem]">{composer.modelLabel}</span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="max-h-[24rem] w-72 overflow-y-auto rounded-md">
@@ -156,11 +156,11 @@ export function Composer({ state }: { state: Record<string, any> }) {
         </div>
 
         {composer.thread ? (
-          <div className="mx-auto mt-1.5 flex w-full max-w-3xl flex-wrap items-center gap-1.5 px-1 text-[11px] text-[var(--muted-text)]">
+          <div className="mx-auto mt-1.5 flex w-full max-w-3xl min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 overflow-hidden px-1 text-[11px] text-[var(--muted-text)]">
             <span className="text-[var(--muted-text-soft)]">PROJECT</span>
-            <span className="font-medium text-[var(--ink)]">{composer.selectedProject?.name || "Local"}</span>
+            <span className="min-w-0 max-w-[42vw] truncate font-medium text-[var(--ink)] sm:max-w-none">{composer.selectedProject?.name || "Local"}</span>
             <span className="text-[var(--muted-text-soft)]">·</span>
-            <span>로컬 Codex 세션</span>
+            <span className="truncate">로컬 Codex 세션</span>
             {composer.branches?.branches?.length ? (
               <>
                 <span className="text-[var(--muted-text-soft)]">·</span>
@@ -195,4 +195,3 @@ export function Composer({ state }: { state: Record<string, any> }) {
     </div>
   )
 }
-
