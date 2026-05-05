@@ -87,7 +87,8 @@ function startBridge() {
 async function startBackgroundCompanion() {
   const runningHealth = await getBridgeHealth();
   const runningUrl = runningHealth?.bridgeUrl || "";
-  const runningUrlReady = publicUrl || localMode;
+  const hasStablePublicUrl = runningUrl && runningUrl !== targetUrl;
+  const runningUrlReady = publicUrl || localMode || hasStablePublicUrl;
   if (runningHealth?.ok && runningUrlReady) {
     if (publicUrl) await setPublicUrl(publicUrl).catch(() => {});
     if (openBrowser) await openUrl(desktopUrl);
