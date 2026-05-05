@@ -17,7 +17,8 @@
     "serve": "npm run build && node src/bridge/server.js",
     "doctor": "node src/bridge/doctor.js",
     "setup": "npm install && npm run doctor",
-    "probe": "node src/bridge/probe.js"
+    "probe": "node src/bridge/probe.js",
+    "icons": "node scripts/generate-pwa-icons.mjs"
   },
   "engines": {
     "node": ">=20"
