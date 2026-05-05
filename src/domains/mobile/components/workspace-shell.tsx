@@ -1,4 +1,4 @@
-import { FolderGit2, FolderOpen, PanelLeft, PanelLeftOpen, Share2, Sparkles } from "lucide-react"
+import { FolderOpen, MessageSquare, PanelLeft, PanelLeftOpen, Share2, Sparkles } from "lucide-react"
 
 import { patchState } from "@/domains/mobile/runtime/controller"
 import { Button } from "@/common/ui/button"
@@ -43,7 +43,7 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
           ? "lg:grid-cols-[minmax(0,1fr)]"
           : "lg:grid-cols-[320px_minmax(0,1fr)]",
       )}
-      style={{ height: "var(--app-height, 100dvh)", maxWidth: "var(--app-width, 100vw)" }}
+      style={{ height: "100dvh", maxWidth: "100vw" }}
     >
       <Sidebar state={state} desktopCollapsed={desktopSidebarCollapsed} />
 
@@ -55,8 +55,11 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
           본문으로 바로가기
         </a>
 
-        {/* Slim breadcrumb header */}
-        <header className="sticky top-0 z-20 border-b border-[var(--hairline-soft)] bg-[var(--canvas)]">
+        {/* Slim breadcrumb header — pt = iOS notch/status bar safe area */}
+        <header
+          className="sticky top-0 z-20 border-b border-[var(--hairline-soft)] bg-[var(--canvas)]"
+          style={{ paddingTop: "env(safe-area-inset-top)" }}
+        >
           <div className="mx-auto flex h-12 w-full max-w-3xl items-center gap-2 px-3">
             <SidebarToggle />
             {desktopSidebarCollapsed ? (
@@ -84,16 +87,48 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
               <span className="truncate text-[13px] font-medium text-[var(--ink-strong)]">{title}</span>
             </div>
             <div className="flex items-center gap-0.5">
-              {changesCount ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 gap-1 rounded-md px-2 text-[12.5px] text-[var(--ink)] hover:bg-[var(--row-hover)]"
-                  onClick={() => patchState({ activeTab: "changes" })}
+              {state.thread ? (
+                <div
+                  role="tablist"
+                  aria-label="View"
+                  className="mr-0.5 flex items-center rounded-md border border-[var(--hairline-soft)] bg-[var(--canvas-soft)] p-0.5"
                 >
-                  <FolderGit2 className="size-3.5 text-[var(--muted-text)]" />
-                  <span className="tabular-nums">{changesCount}</span>
-                </Button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={state.activeTab === "chat"}
+                    aria-label="Chat"
+                    onClick={() => patchState({ activeTab: "chat" })}
+                    className={cn(
+                      "inline-flex h-7 items-center gap-1 rounded-[5px] px-2 text-[12px] font-medium transition-colors",
+                      state.activeTab === "chat"
+                        ? "bg-[var(--surface-warm)] text-[var(--ink-strong)] shadow-[0_1px_0_rgba(255,255,255,0.04)]"
+                        : "text-[var(--muted-text)] hover:text-[var(--ink-strong)]",
+                    )}
+                  >
+                    <MessageSquare className="size-3.5" />
+                    <span className="hidden min-[360px]:inline">Chat</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={state.activeTab === "changes"}
+                    aria-label="Changes"
+                    onClick={() => patchState({ activeTab: "changes" })}
+                    className={cn(
+                      "inline-flex h-7 items-center gap-1 rounded-[5px] px-2 text-[12px] font-medium transition-colors",
+                      state.activeTab === "changes"
+                        ? "bg-[var(--surface-warm)] text-[var(--ink-strong)] shadow-[0_1px_0_rgba(255,255,255,0.04)]"
+                        : "text-[var(--muted-text)] hover:text-[var(--ink-strong)]",
+                    )}
+                  >
+                    <Sparkles className="size-3.5" />
+                    <span className="hidden min-[360px]:inline">Changes</span>
+                    {changesCount ? (
+                      <span className="text-[11px] tabular-nums text-[var(--muted-text)]">{changesCount}</span>
+                    ) : null}
+                  </button>
+                </div>
               ) : null}
               <Button
                 variant="ghost"
@@ -117,40 +152,6 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
             </div>
           </div>
         </header>
-
-        {/* Sticky tab strip (mobile only) */}
-        <div className="sticky top-12 z-10 border-b border-[var(--hairline-soft)] bg-[var(--canvas)] lg:hidden">
-          <div className="mx-auto flex w-full max-w-3xl items-center gap-1 px-3 py-1.5">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => patchState({ activeTab: "chat" })}
-              disabled={!state.thread}
-              className={cn(
-                "h-8 rounded-md px-2.5 text-[13px] font-medium",
-                state.activeTab === "chat"
-                  ? "bg-[var(--row-selected)] text-[var(--ink-strong)]"
-                  : "text-[var(--muted-text)] hover:bg-[var(--row-hover)]",
-              )}
-            >
-              Chat
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => patchState({ activeTab: "changes" })}
-              disabled={!state.thread}
-              className={cn(
-                "h-8 gap-1 rounded-md px-2.5 text-[13px] font-medium",
-                state.activeTab === "changes"
-                  ? "bg-[var(--row-selected)] text-[var(--ink-strong)]"
-                  : "text-[var(--muted-text)] hover:bg-[var(--row-hover)]",
-              )}
-            >
-              <Sparkles className="size-3.5" /> Changes
-            </Button>
-          </div>
-        </div>
 
         <main id="main-content" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--canvas)]">
           <div className="min-h-0 min-w-0 flex-1 overflow-hidden">

@@ -1,5 +1,6 @@
-import { useState } from "react"
+import { memo, useMemo, useRef, useState } from "react"
 import {
+  ArrowDown,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -20,8 +21,10 @@ import { mobileController, mobileSelectors, patchState } from "@/domains/mobile/
 import { Button } from "@/common/ui/button"
 import { ScrollArea } from "@/common/ui/scroll-area"
 import { cn } from "@/common/lib/utils"
+import { sanitize } from "@/common/lib/sanitize-html"
 import { useChatStream } from "@/common/hooks/use-chat-stream"
 import { useChangesFiles } from "@/common/hooks/use-changes-files"
+import { useStickToBottom } from "@/common/hooks/use-stick-to-bottom"
 
 const EMPTY_SUGGESTIONS: readonly string[] = [
   "현재 프로젝트 구조를 파악하고 다음 작업을 제안해줘",
@@ -79,21 +82,37 @@ function renderAttachments(attachments: any[]) {
   )
 }
 
-function MessageBubble({ role, item }: { role: "user" | "agent"; item: any }) {
-  const parsed = mobileSelectors.parseMentionedFilesText(mobileSelectors.extractText(item))
-  const text = parsed?.text ?? mobileSelectors.extractText(item)
-  const attachments = mobileSelectors.dedupeAttachments([
-    ...(item.attachments || []),
-    ...(parsed?.attachments || []),
-    ...mobileSelectors.extractAttachments(item),
-  ])
+function MessageBubbleImpl({ role, item }: { role: "user" | "agent"; item: any }) {
+  // Cache parsed text + sanitized HTML keyed on the raw text length so streaming
+  // deltas only re-parse/re-sanitize when the bubble's own text actually grew.
+  // (Each item identity also changes per delta, but the heavy work is here.)
+  const rawText = mobileSelectors.extractText(item)
+  const rawTextLen = rawText.length
+  const itemAttachments = item.attachments
+  const { text, attachments } = useMemo(() => {
+    const parsed = mobileSelectors.parseMentionedFilesText(rawText)
+    const resolvedText = parsed?.text ?? rawText
+    const resolvedAttachments = mobileSelectors.dedupeAttachments([
+      ...(itemAttachments || []),
+      ...(parsed?.attachments || []),
+      ...mobileSelectors.extractAttachments(item),
+    ])
+    return { text: resolvedText, attachments: resolvedAttachments }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item, rawTextLen, itemAttachments])
+
+  const trimmed = text?.trim() ?? ""
+  const html = useMemo(
+    () => (trimmed ? sanitize(mobileSelectors.renderMarkdown(trimmed)) : ""),
+    [trimmed],
+  )
 
   if (role === "user") {
-    if (!text?.trim() && !attachments.length) return null
+    if (!trimmed && !attachments.length) return null
     return (
       <div className="codex-fade-in rounded-lg bg-[var(--bubble-user)] px-4 py-3 text-[var(--ink)]">
-        {text?.trim() ? (
-          <div className="prose-codex" dangerouslySetInnerHTML={{ __html: mobileSelectors.renderMarkdown(text.trim()) }} />
+        {trimmed ? (
+          <div className="prose-codex" dangerouslySetInnerHTML={{ __html: html }} />
         ) : null}
         {renderAttachments(attachments)}
       </div>
@@ -102,13 +121,18 @@ function MessageBubble({ role, item }: { role: "user" | "agent"; item: any }) {
 
   return (
     <div className="codex-fade-in pt-1">
-      {text?.trim() ? (
-        <div className="prose-codex" dangerouslySetInnerHTML={{ __html: mobileSelectors.renderMarkdown(text.trim()) }} />
+      {trimmed ? (
+        <div className="prose-codex" dangerouslySetInnerHTML={{ __html: html }} />
       ) : null}
       {renderAttachments(attachments)}
     </div>
   )
 }
+
+const MessageBubble = memo(
+  MessageBubbleImpl,
+  (prev, next) => prev.role === next.role && prev.item === next.item,
+)
 
 function itemRole(item: any): "user" | "agent" | null {
   const type = String(item?.type || item?.kind || item?.itemType || "").toLowerCase()
@@ -118,14 +142,23 @@ function itemRole(item: any): "user" | "agent" | null {
   return null
 }
 
-function ToolRow({ item }: { item: any }) {
+function ToolRowImpl({ item }: { item: any }) {
   const [open, setOpen] = useState(false)
   const [showJson, setShowJson] = useState(false)
   const type = item.type || item.kind || "unknown"
-  const tone = mobileSelectors.threadStatusTone(mobileSelectors.formatThreadStatus(item.status || item.outcome || item.result?.status))
-  const title = mobileSelectors.toolTitle(type)
-  const summary = mobileSelectors.toolSummary(type, item)
-  const preview = mobileSelectors.toolPreview(type, item)
+  // Cache derived selectors per item identity. `item` reference only changes when
+  // the underlying tool entry actually mutates (status flip, output append).
+  const { tone, title, summary, preview } = useMemo(() => {
+    const t = mobileSelectors.threadStatusTone(
+      mobileSelectors.formatThreadStatus(item.status || item.outcome || item.result?.status),
+    )
+    return {
+      tone: t,
+      title: mobileSelectors.toolTitle(type),
+      summary: mobileSelectors.toolSummary(type, item),
+      preview: mobileSelectors.toolPreview(type, item),
+    }
+  }, [item, type])
 
   const ToolIcon = toolIconFor(type)
   const StatusIcon = statusIconFor(tone)
@@ -190,6 +223,8 @@ function ToolRow({ item }: { item: any }) {
   )
 }
 
+const ToolRow = memo(ToolRowImpl, (prev, next) => prev.item === next.item)
+
 function ApprovalCard({ approval }: { approval: any }) {
   const summary = mobileSelectors.summarizeApproval(approval)
   return (
@@ -247,6 +282,22 @@ function itemNode(item: any) {
 
 export function ChatPane({ state }: { state: Record<string, any> }) {
   const { items, approvals, isBusy, hasThread, startPending } = useChatStream(state)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const queueLength = state.messageQueue?.length || 0
+
+  // Build the contentKey from primitive scalars so useStickToBottom's
+  // useLayoutEffect doesn't fire on every parent render. `items` array
+  // identity changes per token delta even when length/last id are stable.
+  const lastItem = items[items.length - 1]
+  const lastId = lastItem?.item?.id ?? ""
+  const lastTextLen = lastItem ? mobileSelectors.extractText(lastItem.item).length : 0
+  const contentKey = useMemo(
+    () =>
+      `${items.length}:${lastId}:${lastTextLen}:${isBusy ? 1 : 0}:${approvals.length}:${queueLength}`,
+    [items.length, lastId, lastTextLen, isBusy, approvals.length, queueLength],
+  )
+
+  const stick = useStickToBottom({ ref: scrollRef, contentKey })
 
   if (!hasThread && !startPending) {
     const projectName = state.selectedProject?.name || "현재 프로젝트"
@@ -273,34 +324,58 @@ export function ChatPane({ state }: { state: Record<string, any> }) {
     )
   }
 
+  const showJumpButton = stick.hasOverflow && !stick.isAtBottom
+
   return (
-    <ScrollArea className="h-full overflow-x-hidden px-3 pb-3 pt-3">
-      <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-3 pb-2">
-        {startPending ? (
-          <MessageBubble role="user" item={{ text: startPending.text, attachments: startPending.attachments }} />
-        ) : null}
+    <div className="relative h-full">
+      <div
+        ref={scrollRef}
+        onScroll={stick.onScroll}
+        className="h-full overflow-y-auto overflow-x-hidden px-3 pb-3 pt-3 [overflow-anchor:auto]"
+      >
+        <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-3 pb-2">
+          {startPending ? (
+            <MessageBubble role="user" item={{ text: startPending.text, attachments: startPending.attachments }} />
+          ) : null}
 
-        {items.map(({ key, item }) => {
-          const node = itemNode(item)
-          return node ? <div key={key}>{node}</div> : null
-        })}
+          {items.map(({ key, item }) => {
+            const node = itemNode(item)
+            return node ? <div key={key}>{node}</div> : null
+          })}
 
-        {isBusy ? (
-          <div className="codex-fade-in inline-flex items-center gap-2 self-start rounded-md px-2 py-1 text-[12.5px] text-[var(--muted-text)]">
-            <Loader2 className="size-3.5 animate-spin text-[var(--primary)]" />
-            Codex가 작업 중입니다.
-          </div>
-        ) : null}
+          {isBusy ? (
+            <div className="codex-fade-in inline-flex items-center gap-2 self-start rounded-md px-2 py-1 text-[12.5px] text-[var(--muted-text)]">
+              <Loader2 className="size-3.5 animate-spin text-[var(--primary)]" />
+              Codex가 작업 중입니다.
+            </div>
+          ) : null}
 
-        <QueuedCard state={state} />
+          <QueuedCard state={state} />
 
-        {approvals.map((approval: any) => (
-          <div key={approval.requestId}>
-            <ApprovalCard approval={approval} />
-          </div>
-        ))}
+          {approvals.map((approval: any) => (
+            <div key={approval.requestId}>
+              <ApprovalCard approval={approval} />
+            </div>
+          ))}
+        </div>
       </div>
-    </ScrollArea>
+
+      <button
+        type="button"
+        aria-label="Scroll to bottom"
+        tabIndex={showJumpButton ? 0 : -1}
+        aria-hidden={!showJumpButton}
+        onClick={() => stick.scrollToBottom()}
+        className={cn(
+          "absolute bottom-3 left-1/2 z-20 grid size-9 -translate-x-1/2 place-items-center rounded-full border border-[var(--hairline)] bg-[var(--surface-warm)]/90 text-[var(--ink-strong)] shadow-[0_8px_24px_-6px_rgba(0,0,0,0.6)] backdrop-blur-md transition-[opacity,transform] motion-safe:duration-200",
+          showJumpButton
+            ? "translate-y-0 opacity-100"
+            : "pointer-events-none translate-y-2 opacity-0",
+        )}
+      >
+        <ArrowDown className="size-4" />
+      </button>
+    </div>
   )
 }
 

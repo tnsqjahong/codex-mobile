@@ -1,3 +1,4 @@
+import { useRef } from "react"
 import { Brain, Paperclip, Send, Shield, Square, X } from "lucide-react"
 
 import { Button } from "@/common/ui/button"
@@ -20,12 +21,35 @@ import {
 import { Textarea } from "@/common/ui/textarea"
 import { cn } from "@/common/lib/utils"
 import { useComposer } from "@/common/hooks/use-composer"
+import { useComposerSuggestions } from "@/common/hooks/use-composer-suggestions"
+import { ComposerSuggestions } from "@/domains/mobile/components/composer-suggestions"
+
+const EMPTY_ARRAY: readonly any[] = []
 
 export function Composer({ state }: { state: Record<string, any> }) {
   const composer = useComposer(state)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const suggestions = useComposerSuggestions({
+    textareaRef,
+    draftText: composer.draftText,
+    skills: state.skills ?? EMPTY_ARRAY,
+    composerMentions: state.composerMentions ?? EMPTY_ARRAY,
+    cwd: composer.selectedProject?.cwd || composer.thread?.cwd || "",
+    hasThread: Boolean(composer.thread),
+    threadId: composer.thread?.id ?? null,
+  })
 
   return (
-    <div className="w-full max-w-full px-3 pb-[calc(env(safe-area-inset-bottom)+0.65rem)] pt-2">
+    <div
+      className="w-full max-w-full px-3 pt-1"
+      style={{
+        // Android Chrome chin 애니메이션이 layout thrash 일으키지 않도록
+        // safe-area-max-inset-bottom(정적 max)을 우선, iOS는 inner fallback으로
+        // safe-area-inset-bottom(notched=34px, 그 외 0)을 사용. 최소 8px 보장.
+        paddingBottom:
+          "max(env(safe-area-max-inset-bottom, env(safe-area-inset-bottom, 0px)), 0.5rem)",
+      }}
+    >
       {composer.attachments.length ? (
         <div className="mx-auto mb-1.5 flex w-full max-w-3xl flex-wrap gap-1.5">
           {composer.attachments.map((attachment: any) => (
@@ -48,13 +72,18 @@ export function Composer({ state }: { state: Record<string, any> }) {
       ) : null}
 
       <form
-        className="codex-floating-pad mx-auto w-full max-w-3xl p-1.5"
+        className="codex-floating-pad relative mx-auto w-full max-w-3xl p-1.5"
         onSubmit={composer.onSubmit}
       >
+        <ComposerSuggestions view={suggestions} />
         <Textarea
+          ref={textareaRef}
           id="message-input"
           value={composer.draftText}
           onChange={(event) => composer.onDraftChange(event.target.value)}
+          onKeyDown={suggestions.onKeyDown}
+          onSelect={suggestions.onSelectionChange}
+          onBlur={suggestions.dismiss}
           placeholder={composer.thread ? "Codex에게 메시지 보내기" : "Codex에게 무엇을 도와줄지 설명해보세요"}
           className="min-h-[56px] resize-none rounded-xl border-0 bg-transparent px-2.5 py-2 text-[14.5px] leading-relaxed shadow-none placeholder:text-[var(--muted-text-soft)] focus-visible:ring-0"
         />

@@ -6,6 +6,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
+import { detectFunnelUrl } from "../src/bridge/tailscale.js";
+
 const execFile = promisify(execFileCallback);
 const entryFile = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(entryFile);
@@ -40,11 +42,17 @@ if (!bridgeWasRunning) {
 }
 
 if (!publicUrl && !localMode) {
-  tunnel = await startRemoteTunnel(targetUrl).catch((error) => {
-    console.warn(`Remote tunnel failed: ${error.message}`);
-    return null;
-  });
-  publicUrl = tunnel?.url || localLanUrl;
+  const funnelUrl = await withTimeout(detectFunnelUrl(port), 1500).catch(() => null);
+  if (funnelUrl) {
+    console.log(`Using Tailscale Funnel: ${funnelUrl}`);
+    publicUrl = funnelUrl;
+  } else {
+    tunnel = await startRemoteTunnel(targetUrl).catch((error) => {
+      console.warn(`Remote tunnel failed: ${error.message}`);
+      return null;
+    });
+    publicUrl = tunnel?.url || localLanUrl;
+  }
 } else if (!publicUrl) {
   publicUrl = localLanUrl;
 }
@@ -79,7 +87,8 @@ function startBridge() {
 async function startBackgroundCompanion() {
   const runningHealth = await getBridgeHealth();
   const runningUrl = runningHealth?.bridgeUrl || "";
-  const runningUrlReady = publicUrl || localMode;
+  const hasStablePublicUrl = runningUrl && runningUrl !== targetUrl;
+  const runningUrlReady = publicUrl || localMode || hasStablePublicUrl;
   if (runningHealth?.ok && runningUrlReady) {
     if (publicUrl) await setPublicUrl(publicUrl).catch(() => {});
     if (openBrowser) await openUrl(desktopUrl);
@@ -294,4 +303,11 @@ async function openUrl(url) {
 function shutdown() {
   for (const child of children) child.kill("SIGTERM");
   process.exit(0);
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+  ]);
 }

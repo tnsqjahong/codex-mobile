@@ -17,17 +17,20 @@
     "serve": "npm run build && node src/bridge/server.js",
     "doctor": "node src/bridge/doctor.js",
     "setup": "npm install && npm run doctor",
-    "probe": "node src/bridge/probe.js"
+    "probe": "node src/bridge/probe.js",
+    "icons": "node scripts/generate-pwa-icons.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.4",
+    "@types/dompurify": "^3.0.5",
     "@types/node": "^25.6.0",
     "@vitejs/plugin-react": "^6.0.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dompurify": "^3.4.2",
     "lucide-react": "^1.14.0",
     "radix-ui": "^1.4.3",
     "react": "^19.2.5",
@@ -36,5 +39,10 @@
     "tailwindcss": "^4.2.4",
     "typescript": "^6.0.3",
     "vite": "^8.0.10"
+  },
+  "devDependencies": {
+    "sharp": "^0.34.5",
+    "vite-plugin-pwa": "^1.2.0",
+    "workbox-window": "^7.4.1"
   }
 }

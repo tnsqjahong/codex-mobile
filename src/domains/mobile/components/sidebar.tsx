@@ -20,6 +20,7 @@ import {
 import { ScrollArea } from "@/common/ui/scroll-area"
 import { cn } from "@/common/lib/utils"
 import { useFilteredThreads } from "@/common/hooks/use-filtered-threads"
+import { useMediaQuery } from "@/common/hooks/use-media-query"
 
 function startNewThread(state: Record<string, any>) {
   patchState({
@@ -43,16 +44,18 @@ function openSettings() {
   patchState({ sidebarOpen: false })
 }
 
-function toggleTab(tab: "chat" | "changes") {
-  patchState({ activeTab: tab, screen: "workspace", sidebarOpen: false })
-}
-
 function SidebarBody({ state }: { state: Record<string, any> }) {
   const threads = useFilteredThreads(state)
-  const changesCount = state.changes?.summary?.filesChanged || 0
 
   return (
-    <div className="flex h-full flex-col bg-[var(--sidebar-bg)] text-[var(--ink)]">
+    <div
+      className="flex h-full flex-col bg-[var(--sidebar-bg)] text-[var(--ink)]"
+      style={{
+        paddingTop: "env(safe-area-inset-top)",
+        paddingBottom:
+          "env(safe-area-max-inset-bottom, env(safe-area-inset-bottom, 0px))",
+      }}
+    >
       {/* Brand header */}
       <div className="flex items-center justify-between gap-2 px-4 pt-4 pb-2">
         <div className="flex items-center gap-2">
@@ -175,26 +178,12 @@ function SidebarBody({ state }: { state: Record<string, any> }) {
       </ScrollArea>
 
       {/* Footer */}
-      <div className="border-t border-[var(--hairline-soft)] px-2 py-2 space-y-0.5">
-        <Button variant="ghost" disabled={!state.thread} onClick={() => toggleTab("chat")}
-          className={cn(
-            "h-9 w-full justify-start gap-2 rounded-md text-[13.5px] text-[var(--ink)] hover:bg-[var(--row-hover)]",
-            state.activeTab === "chat" && state.thread && "bg-[var(--row-selected)]"
-          )}>
-          <FolderOpen className="size-4 text-[var(--muted-text)]" /> Chat
-        </Button>
-        <Button variant="ghost" disabled={!state.thread} onClick={() => toggleTab("changes")}
-          className={cn(
-            "h-9 w-full justify-start gap-2 rounded-md text-[13.5px] text-[var(--ink)] hover:bg-[var(--row-hover)]",
-            state.activeTab === "changes" && state.thread && "bg-[var(--row-selected)]"
-          )}>
-          <Sparkles className="size-4 text-[var(--muted-text)]" /> Changes
-          {changesCount ? (
-            <span className="ml-auto rounded-full bg-[var(--canvas-soft)] px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-[var(--ink)]">{changesCount}</span>
-          ) : null}
-        </Button>
-        <Button variant="ghost" onClick={openSettings}
-          className="h-9 w-full justify-start gap-2 rounded-md text-[13.5px] text-[var(--ink)] hover:bg-[var(--row-hover)]">
+      <div className="border-t border-[var(--hairline-soft)] px-2 py-2">
+        <Button
+          variant="ghost"
+          onClick={openSettings}
+          className="h-9 w-full justify-start gap-2 rounded-md text-[13.5px] text-[var(--ink)] hover:bg-[var(--row-hover)]"
+        >
           <Settings2 className="size-4 text-[var(--muted-text)]" /> Settings
         </Button>
       </div>
@@ -203,6 +192,7 @@ function SidebarBody({ state }: { state: Record<string, any> }) {
 }
 
 export function Sidebar({ state, desktopCollapsed = false }: { state: Record<string, any>; desktopCollapsed?: boolean }) {
+  const isWide = useMediaQuery("(min-width: 1024px)")
   return (
     <>
       <div
@@ -213,7 +203,7 @@ export function Sidebar({ state, desktopCollapsed = false }: { state: Record<str
       >
         <SidebarBody state={state} />
       </div>
-      <Sheet open={state.sidebarOpen && !window.matchMedia("(min-width: 1024px)").matches} onOpenChange={(open) => patchState({ sidebarOpen: open })}>
+      <Sheet open={state.sidebarOpen && !isWide} onOpenChange={(open) => patchState({ sidebarOpen: open })}>
         <SheetContent side="left" className="w-[84vw] max-w-[340px] border-r border-[var(--hairline-soft)] bg-[var(--sidebar-bg)] p-0" showCloseButton={false}>
           <SheetHeader className="sr-only">
             <SheetTitle>Chats navigation</SheetTitle>

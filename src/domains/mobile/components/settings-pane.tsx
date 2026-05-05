@@ -1,106 +1,228 @@
-import { ArrowLeft, Bell, Bot, PlugZap, Puzzle, Sparkles } from "lucide-react"
+import { type ReactNode, useState } from "react"
+import {
+  ArrowLeft,
+  Bell,
+  Bot,
+  ChevronDown,
+  Layers,
+  Puzzle,
+  Server,
+  Sparkles,
+  Workflow,
+} from "lucide-react"
 
 import { mobileController } from "@/domains/mobile/runtime/controller"
 import { Button } from "@/common/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/common/ui/card"
 import { ScrollArea } from "@/common/ui/scroll-area"
+import { cn } from "@/common/lib/utils"
+import { useSettingsSummary } from "@/common/hooks/use-settings-summary"
 
-function collectPlugins(plugins: any) {
-  return (plugins?.marketplaces || []).flatMap((market: any) => market.plugins || [])
-}
-
-function renderRateLimit(rateLimits: any) {
-  const primary = rateLimits?.rateLimits?.primary
-  if (!primary) return null
-  return <p className="text-sm text-muted-foreground">Usage {primary.usedPercent}%{primary.resetsAt ? ` · resets ${new Intl.DateTimeFormat("ko", { dateStyle: "short", timeStyle: "short" }).format(new Date(primary.resetsAt))}` : ""}</p>
-}
-
-function formatAccount(account: any, requiresOpenaiAuth: boolean) {
-  if (account?.type === "chatgpt") return `${account.email} · ${account.planType}`
-  if (account?.type) return account.type
-  return requiresOpenaiAuth ? "Login required" : "No account details"
-}
-
-function CollectionCard({ title, icon: Icon, items }: { title: string; icon: any; items: string[] }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <Card className="border-border bg-card shadow-none">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base"><Icon className="size-4 text-primary" /> {title}</CardTitle>
-        <CardDescription>{items.length} items</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-2">
-        {items.length ? items.slice(0, 30).map((item) => (
-          <div key={item} className="rounded-2xl border border-border bg-[var(--canvas-soft)] px-3 py-2 text-sm text-muted-foreground">{item}</div>
-        )) : <p className="text-sm text-muted-foreground">No items.</p>}
-      </CardContent>
-    </Card>
+    <section>
+      <h2 className="px-1 pb-1.5 text-[10.5px] font-medium uppercase tracking-[0.14em] text-[var(--muted-text)]">
+        {title}
+      </h2>
+      <div className="overflow-hidden rounded-2xl border border-[var(--hairline-soft)] bg-[var(--surface-warm)] divide-y divide-[var(--hairline-soft)]">
+        {children}
+      </div>
+    </section>
+  )
+}
+
+function StaticRow({
+  label,
+  description,
+  value,
+}: {
+  label: string
+  description?: string
+  value?: ReactNode
+}) {
+  return (
+    <div className="flex items-start gap-3 px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-[13.5px] text-[var(--ink-strong)]">{label}</div>
+        {description ? (
+          <div className="mt-0.5 text-[12px] leading-relaxed text-[var(--muted-text)]">{description}</div>
+        ) : null}
+      </div>
+      {value !== undefined ? (
+        <div className="shrink-0 self-center text-[13px] text-[var(--muted-text)]">{value}</div>
+      ) : null}
+    </div>
+  )
+}
+
+function ActionRow({
+  label,
+  description,
+  action,
+}: {
+  label: string
+  description?: string
+  action: ReactNode
+}) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-[13.5px] text-[var(--ink-strong)]">{label}</div>
+        {description ? (
+          <div className="mt-0.5 text-[12px] leading-relaxed text-[var(--muted-text)]">{description}</div>
+        ) : null}
+      </div>
+      <div className="shrink-0">{action}</div>
+    </div>
+  )
+}
+
+function CollectionRow({
+  icon: Icon,
+  label,
+  items,
+}: {
+  icon: typeof Puzzle
+  label: string
+  items: string[]
+}) {
+  const [open, setOpen] = useState(false)
+  const empty = items.length === 0
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        disabled={empty}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--row-hover)] disabled:cursor-default disabled:opacity-70"
+      >
+        <Icon className="size-4 text-[var(--muted-text)]" />
+        <span className="flex-1 text-[13.5px] text-[var(--ink-strong)]">{label}</span>
+        <span className="text-[12px] tabular-nums text-[var(--muted-text)]">{items.length}</span>
+        {empty ? null : (
+          <ChevronDown
+            className={cn(
+              "size-4 text-[var(--muted-text)] transition-transform",
+              open && "rotate-180",
+            )}
+          />
+        )}
+      </button>
+      {open && !empty ? (
+        <div className="border-t border-[var(--hairline-soft)] bg-[var(--canvas-soft)] px-2 py-1.5">
+          <ul className="max-h-72 overflow-y-auto">
+            {items.slice(0, 100).map((item) => (
+              <li
+                key={item}
+                className="rounded-md px-2 py-1 text-[12.5px] text-[var(--muted-text)]"
+              >
+                {item}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
   )
 }
 
 export function SettingsPane({ state }: { state: Record<string, any> }) {
-  const settings = state.settings || {}
-  const account = settings.account?.account
-  const plugins = collectPlugins(settings.plugins).map((plugin: any) => plugin.interface?.displayName || plugin.name)
-  const skills = (settings.skills?.data || []).flatMap((entry: any) => entry.skills || []).map((skill: any) => skill.name || skill.metadata?.name)
-  const apps = (settings.apps?.data || []).map((item: any) => item.name || item.id)
-  const mcpServers = (settings.mcpServers?.mcpServers || settings.mcpServers?.data || []).map((item: any) => item.name || item.id || item.serverName)
-  const automations = (settings.automations?.data || []).map((item: any) => `${item.name}${item.status ? ` · ${item.status}` : ""}`)
+  const view = useSettingsSummary(state)
 
   return (
-    <div className="flex h-svh flex-col bg-background text-foreground">
-      <header className="sticky top-0 z-10 border-b border-border bg-background/95 px-3 py-3 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-4xl items-center gap-2">
-          <Button variant="ghost" size="icon-sm" className="rounded-full" onClick={() => mobileController.backToWorkspace()}>
-            <ArrowLeft className="size-4" />
+    <div className="flex h-dvh flex-col bg-background text-foreground">
+      <header
+        className="sticky top-0 z-10 border-b border-[var(--hairline-soft)] bg-[var(--canvas)]"
+        style={{ paddingTop: "env(safe-area-inset-top)" }}
+      >
+        <div className="mx-auto flex h-12 w-full max-w-3xl items-center gap-2 px-3">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="rounded-md hover:bg-[var(--row-hover)]"
+            aria-label="Back"
+            onClick={() => mobileController.backToWorkspace()}
+          >
+            <ArrowLeft className="size-4 text-[var(--muted-text)]" />
           </Button>
-          <div>
-            <div className="font-semibold tracking-tight">Settings</div>
-            <p className="text-xs text-muted-foreground">Account, plugins, skills, automations</p>
-          </div>
+          <h1 className="text-[14px] font-semibold tracking-tight text-[var(--ink-strong)]">
+            Settings
+          </h1>
         </div>
       </header>
 
-      <ScrollArea className="flex-1 px-3 pb-10 pt-3">
-        <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 pb-10">
-          <Card className="border-border bg-card shadow-none">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base"><Bot className="size-4 text-primary" /> Account</CardTitle>
-              <CardDescription>{formatAccount(account, settings.account?.requiresOpenaiAuth)}</CardDescription>
-            </CardHeader>
-            <CardContent>{renderRateLimit(settings.rateLimits)}</CardContent>
-          </Card>
+      <ScrollArea className="flex-1">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-3 py-5 pb-12 sm:px-4">
+          <div className="flex items-center gap-3 rounded-2xl border border-[var(--hairline-soft)] bg-[var(--surface-warm)] px-4 py-4">
+            <div className="grid size-10 place-items-center rounded-full bg-[var(--canvas-soft)]">
+              <Bot className="size-5 text-[var(--muted-text)]" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[14px] font-medium text-[var(--ink-strong)]">
+                {view.account.primaryLabel}
+              </div>
+              <div className="mt-0.5 flex items-center gap-1.5">
+                {view.account.planLabel ? (
+                  <span className="rounded-full border border-[var(--hairline)] bg-[var(--canvas-soft)] px-1.5 py-0.5 text-[10.5px] font-medium uppercase tracking-wider text-[var(--muted-text)]">
+                    {view.account.planLabel}
+                  </span>
+                ) : null}
+                <span className="text-[11.5px] text-[var(--muted-text)]">
+                  {view.account.loggedIn ? "Connected" : "Not signed in"}
+                </span>
+              </div>
+            </div>
+          </div>
 
-          <Card className="border-border bg-card shadow-none">
-            <CardHeader>
-              <CardTitle className="text-base">Runtime</CardTitle>
-              <CardDescription>Model {settings.config?.summary?.model || "default"} · Reasoning {settings.config?.summary?.effort || "default"}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">Approval {settings.config?.summary?.approvalPolicy || "default"} · Sandbox {settings.config?.summary?.sandboxMode || "workspace"}</p>
-            </CardContent>
-          </Card>
+          {view.usage.percent !== null || view.usage.resetsAt ? (
+            <Section title="Usage">
+              {view.usage.percent !== null ? (
+                <StaticRow label="이번 주기 사용량" value={`${view.usage.percent}%`} />
+              ) : null}
+              {view.usage.resetsAt ? <StaticRow label="다음 초기화" value={view.usage.resetsAt} /> : null}
+            </Section>
+          ) : null}
 
-          <Card className="border-border bg-card shadow-none">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base"><Bell className="size-4 text-primary" /> Notifications</CardTitle>
-              <CardDescription>{state.notificationsEnabled ? "이 브라우저 세션에서 알림이 활성화되어 있습니다." : "작업 완료/승인 요청 알림을 브라우저에서 받습니다."}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {"Notification" in window ? (
-                <Button variant="secondary" onClick={() => void mobileController.enableNotifications()} disabled={state.notificationsEnabled}>
-                  알림 켜기
-                </Button>
-              ) : (
-                <p className="text-sm text-muted-foreground">This browser does not support notifications.</p>
-              )}
-            </CardContent>
-          </Card>
+          <Section title="Runtime">
+            <StaticRow label="Model" value={view.runtime.model} />
+            <StaticRow label="Reasoning" value={view.runtime.effort} />
+            <StaticRow label="Approval" value={view.runtime.approval} />
+            <StaticRow label="Sandbox" value={view.runtime.sandbox} />
+          </Section>
 
-          <CollectionCard title="Plugins" icon={Puzzle} items={plugins} />
-          <CollectionCard title="Skills" icon={Sparkles} items={skills} />
-          <CollectionCard title="Apps" icon={PlugZap} items={apps} />
-          <CollectionCard title="MCP Servers" icon={PlugZap} items={mcpServers} />
-          <CollectionCard title="Automations" icon={Sparkles} items={automations} />
+          <Section title="Notifications">
+            <ActionRow
+              label="브라우저 알림"
+              description={
+                view.supportsNotifications
+                  ? state.notificationsEnabled
+                    ? "이 브라우저 세션에서 알림이 활성화되어 있습니다."
+                    : "작업 완료/승인 요청 알림을 브라우저에서 받습니다."
+                  : "이 브라우저는 알림을 지원하지 않습니다."
+              }
+              action={
+                view.supportsNotifications ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void mobileController.enableNotifications()}
+                    disabled={Boolean(state.notificationsEnabled)}
+                    className="h-8 rounded-md px-3 text-[12.5px]"
+                  >
+                    <Bell className="size-3.5" />
+                    {state.notificationsEnabled ? "On" : "Enable"}
+                  </Button>
+                ) : null
+              }
+            />
+          </Section>
+
+          <Section title="Installed">
+            <CollectionRow icon={Puzzle} label="Plugins" items={view.plugins} />
+            <CollectionRow icon={Sparkles} label="Skills" items={view.skills} />
+            <CollectionRow icon={Layers} label="Apps" items={view.apps} />
+            <CollectionRow icon={Server} label="MCP Servers" items={view.mcpServers} />
+            <CollectionRow icon={Workflow} label="Automations" items={view.automations} />
+          </Section>
         </div>
       </ScrollArea>
     </div>

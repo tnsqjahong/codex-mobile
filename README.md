@@ -117,7 +117,7 @@ Implemented:
 - Settings surface for account, rate limits, runtime config, plugins, skills, apps, MCP servers, and automations.
 - Desktop-style `$skill`, `@context`, and `/command` composer pickers backed by App Server skills, fuzzy file search, apps, plugins, and thread actions.
 - Mobile image/file attachments in the chat composer. Images are sent as Codex `localImage` inputs; files are staged on the desktop and referenced by local path.
-- Web-only mobile experience opened from the pairing QR; install prompts are intentionally not shown.
+- Installable PWA (manifest, service worker, iOS-compatible meta tags). The in-app install prompt is suppressed on temporary tunnel origins (`*.trycloudflare.com`, `*.ngrok.app`, `*.loca.lt`); it activates on stable origins (Tailscale Funnel `*.ts.net`, LAN IP, custom domains).
 - Message send with model/effort overrides, interrupt, approval response, and WebSocket event handling hooks.
 - Session notifications for approval requests and completed Codex turns while the mobile browser is connected.
 - QR-time Codex App Server and project-cache prewarm so mobile opens quickly after scanning.
@@ -128,11 +128,68 @@ Known next work:
 - Harden approval response shapes for `item/permissions/requestApproval`.
 - Add paired-device revocation, desktop-side pairing confirmation, and plugin/automation mutation UI.
 
-## Web-Only Reality
+## Stable URL for "install once" PWA (optional)
 
-The QR code opens the paired mobile web app in the browser. This project intentionally does not prompt users to install an app because the default tunnel URL is temporary and changes between desktop companion sessions.
+By default, `npm start` creates a temporary `*.trycloudflare.com` tunnel that
+rotates per session — fine for QR pairing, not for installing the app to your
+phone home screen.
 
-Closed-app push notifications are intentionally out of scope for local-session mode because mobile browsers require a stable origin plus Web Push subscription storage for that. This project only targets notifications while the paired mobile app is connected during the current desktop session.
+If you want a permanent URL so the PWA installs once and survives desktop
+restarts, expose the bridge through a stable origin and pass it via
+`PUBLIC_URL`. Recommended free setup:
+
+### Tailscale Funnel (automated)
+
+One-time setup on the desktop:
+
+1. Install Tailscale and sign in with any account (Google/GitHub/etc).
+2. Run `npm run setup`. The doctor checks for the Tailscale CLI and login,
+   detects whether Funnel is already enabled for the bridge port, and — if
+   not — offers to enable it for you (sudo password required, one prompt):
+
+   ```text
+   Tailscale Funnel (optional, for stable PWA URL):
+     Funnel for port 8787 is not configured (device: my-mac.tail-xxxx.ts.net).
+            Enable now (sudo password required)? [y/N] y
+     OK   Funnel enabled at https://my-mac.tail-xxxx.ts.net
+   ```
+
+3. Done. From now on, `npm start` automatically detects the active Funnel
+   and uses its URL for the mobile QR — no `PUBLIC_URL` env var needed.
+
+To enable manually instead, run `sudo tailscale funnel --bg 8787` once.
+
+Open the QR'd URL on your phone, complete pairing, then **Add to Home
+Screen** (iOS Safari) or tap **Install** when the in-app prompt appears
+(Android Chrome). The icon survives desktop restarts; only the per-session
+pairing token is renewed on next launch.
+
+### Override priority
+
+`PUBLIC_URL` env var > detected Tailscale Funnel > Cloudflare quick tunnel.
+Set `PUBLIC_URL` only if you want to pin the QR to a different stable
+origin (e.g. Cloudflare named tunnel on your own domain).
+
+### Notes
+
+- Tailscale Funnel is free on the Personal plan (April 2026 update: 6 users,
+  unlimited devices, Funnel included).
+- The pairing token is still per-session; this only fixes the URL, not the
+  token. Long-lived device tokens are tracked as future work.
+- Tailscale Funnel exposes the URL publicly. The pairing-token check still
+  gates every API call, identical to the temporary tunnel mode.
+
+### Other stable origins
+
+Any stable HTTPS origin works — Cloudflare named tunnels with your own
+domain, ngrok paid subdomains, self-hosted reverse proxies, or even a fixed
+LAN IP for same-network use. Set `PUBLIC_URL` accordingly.
+
+## Notification scope
+
+Closed-app push notifications remain out of scope: this project only delivers
+notifications while the paired mobile browser/PWA is connected during the
+current desktop session.
 
 ## Simple User Path
 

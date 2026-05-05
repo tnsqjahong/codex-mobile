@@ -112,8 +112,8 @@ html {
 }
 
 html, body {
-  height: var(--app-height, 100dvh);
-  min-height: var(--app-height, 100dvh);
+  height: 100dvh;
+  min-height: 100dvh;
 }
 
 body {
@@ -121,7 +121,7 @@ body {
   margin: 0;
   width: 100%;
   max-width: 100%;
-  height: var(--app-height, 100dvh);
+  height: 100dvh;
   overflow: hidden;
   font-feature-settings: "liga" 1, "kern" 1;
   text-rendering: optimizeLegibility;
@@ -140,12 +140,12 @@ select {
 #app {
   width: 100%;
   max-width: 100%;
-  height: var(--app-height, 100dvh);
+  height: 100dvh;
   overflow: hidden;
 }
 
 .h-dvh {
-  height: var(--app-height, 100dvh) !important;
+  height: 100dvh !important;
 }
 
 button,
