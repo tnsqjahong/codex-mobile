@@ -19,7 +19,16 @@ const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || "127.0.0.1";
 
 const rpc = new CodexRpc();
-const wsClients = new Set();
+const sseClients = new Set();
+let sseHeartbeatTimer = null;
+let ticketSweepTimer = null;
+const SSE_HEARTBEAT_MS = 25_000;
+const TICKET_SWEEP_MS = 60_000;
+const TICKET_TTL_MS = 30_000;
+const SSE_BUFFER_MAX = 500;
+let sseEventCounter = 0;
+const sseEventBuffer = [];
+const tickets = new Map();
 const pairings = new Map();
 const sessions = new Map();
 const activeTurns = new Map();
@@ -80,18 +89,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.on("upgrade", (req, socket) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  if (url.pathname !== "/api/events") {
-    socket.destroy();
-    return;
-  }
-  const token = url.searchParams.get("token");
-  if (!isValidToken(token)) {
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-    socket.destroy();
-    return;
-  }
-  upgradeWebSocket(req, socket);
+  // SSE migration: no WebSocket upgrade endpoints exist anymore.
+  socket.destroy();
 });
 
 server.listen(port, host, () => {
@@ -105,6 +104,20 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 function shutdown() {
+  if (sseHeartbeatTimer) {
+    clearInterval(sseHeartbeatTimer);
+    sseHeartbeatTimer = null;
+  }
+  if (ticketSweepTimer) {
+    clearInterval(ticketSweepTimer);
+    ticketSweepTimer = null;
+  }
+  for (const client of sseClients) {
+    try { client.res.end(); } catch {}
+  }
+  sseClients.clear();
+  sseEventBuffer.length = 0;
+  tickets.clear();
   rpc.stop();
   server.close(() => process.exit(0));
 }
@@ -178,7 +191,7 @@ async function handleApi(req, res, url) {
       console.warn(`Failed to prewarm Codex projects: ${error.message || error}`);
     });
     const code = crypto.randomBytes(4).toString("hex").toUpperCase();
-    const expiresAt = Date.now() + 60_000;
+    const expiresAt = Date.now() + 300_000; // 5분 TTL — 모바일 수동 입력에 여유
     const qrUrl = `${getPublicBaseUrl()}/?pair=${code}`;
     pairings.set(code, { expiresAt, qrUrl });
     sendJson(res, 200, {
@@ -207,6 +220,19 @@ async function handleApi(req, res, url) {
 
   if (!isAuthorized(req, url)) {
     sendJson(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/events/ticket") {
+    const ticket = crypto.randomBytes(32).toString("base64url");
+    const expiresAt = Date.now() + TICKET_TTL_MS;
+    tickets.set(ticket, { userToken: req._authToken, expiresAt });
+    sendJson(res, 200, { ticket, expiresAt });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/events") {
+    handleSseEvents(req, res, url);
     return;
   }
 
@@ -351,7 +377,10 @@ async function handleApi(req, res, url) {
       threadId: decodeURIComponent(threadMatch[1]),
       includeTurns: true,
     });
-    sendJson(res, 200, result);
+    // Anchor for gap-free SSE resume: client passes this back as ?lastEventId=
+    // when (re)opening EventSource so the ring buffer replays anything that
+    // arrived between this snapshot and the SSE handshake.
+    sendJson(res, 200, { ...result, latestEventId: String(sseEventCounter) });
     return;
   }
 
@@ -820,12 +849,44 @@ function extractThreadId(message) {
 function isAuthorized(req, url = null) {
   const auth = req.headers.authorization || "";
   const headerToken = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-  return isValidToken(headerToken || url?.searchParams?.get("token"));
+  if (isValidToken(headerToken)) {
+    req._authToken = headerToken;
+    return true;
+  }
+  const queryToken = url?.searchParams?.get("token");
+  if (isValidToken(queryToken)) {
+    req._authToken = queryToken;
+    return true;
+  }
+  // Ticket-based auth for SSE: single-use, short-lived.
+  const ticket = url?.searchParams?.get("ticket");
+  if (ticket) {
+    const entry = tickets.get(ticket);
+    if (entry && entry.expiresAt > Date.now() && isValidToken(entry.userToken)) {
+      tickets.delete(ticket);
+      req._authToken = entry.userToken;
+      return true;
+    }
+    if (entry) tickets.delete(ticket);
+  }
+  return false;
 }
 
 function isValidToken(token) {
   const session = token ? sessions.get(token) : null;
   return Boolean(session && session.expiresAt > Date.now());
+}
+
+function getSessionForToken(token) {
+  if (!token) return null;
+  return sessions.get(token) || null;
+}
+
+function sweepExpiredTickets() {
+  const now = Date.now();
+  for (const [key, entry] of tickets) {
+    if (entry.expiresAt <= now) tickets.delete(key);
+  }
 }
 
 function isLoopbackRequest(req) {
@@ -1153,100 +1214,120 @@ function contentType(file) {
   return "application/octet-stream";
 }
 
-function upgradeWebSocket(req, socket) {
-  const key = req.headers["sec-websocket-key"];
-  const accept = crypto
-    .createHash("sha1")
-    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
-    .digest("base64");
-  socket.write(
-    "HTTP/1.1 101 Switching Protocols\r\n" +
-      "Upgrade: websocket\r\n" +
-      "Connection: Upgrade\r\n" +
-      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
-  );
+function handleSseEvents(req, res, url) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    // disables proxy buffering (nginx, cloudflared) so chunks flush immediately
+    "X-Accel-Buffering": "no",
+  });
+  // Hint to EventSource: retry after 3s if disconnected
+  res.write("retry: 3000\n\n");
+  res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
 
-  const client = { socket, subscriptions: new Set() };
-  wsClients.add(client);
-  socket.on("data", (buffer) => handleWsData(client, buffer));
-  socket.on("close", () => wsClients.delete(client));
-  socket.on("error", () => wsClients.delete(client));
-  wsSend(client, { type: "connected" });
+  const sessionToken = req._authToken || null;
+  const session = getSessionForToken(sessionToken);
+  const threadFilterRaw = url?.searchParams?.get("thread") || "";
+  const threadFilter = threadFilterRaw ? String(threadFilterRaw) : null;
+  const client = {
+    res,
+    lastWriteAt: Date.now(),
+    threadFilter,
+    sessionToken,
+    sessionExpiresAt: session?.expiresAt || null,
+  };
+  sseClients.add(client);
+
+  // Replay buffered events after Last-Event-ID. Accepts both the standard
+  // request header (used by EventSource on auto-retry) and a `?lastEventId=`
+  // URL param (used by the client on FRESH connect after a snapshot fetch,
+  // since EventSource has no API to seed Last-Event-ID for the first request).
+  const lastEventIdHeader = req.headers["last-event-id"];
+  const lastEventIdQuery = url.searchParams.get("lastEventId");
+  const lastEventIdRaw = lastEventIdHeader || lastEventIdQuery;
+  const lastSeenId = lastEventIdRaw ? Number(lastEventIdRaw) : NaN;
+  if (Number.isFinite(lastSeenId) && lastSeenId > 0) {
+    for (const buffered of sseEventBuffer) {
+      if (buffered.id <= lastSeenId) continue;
+      if (clientShouldReceive(client, buffered.message)) {
+        try {
+          client.res.write(buffered.line);
+          client.lastWriteAt = Date.now();
+        } catch {
+          sseClients.delete(client);
+          try { res.end(); } catch {}
+          return;
+        }
+      }
+    }
+  }
+
+  const cleanup = () => {
+    if (!sseClients.has(client)) return;
+    sseClients.delete(client);
+    try { res.end(); } catch {}
+    if (sseClients.size === 0 && sseHeartbeatTimer) {
+      clearInterval(sseHeartbeatTimer);
+      sseHeartbeatTimer = null;
+    }
+  };
+  req.on("close", cleanup);
+  req.on("aborted", cleanup);
+  res.on("error", cleanup);
+  res.on("close", cleanup);
+
+  if (!sseHeartbeatTimer) startSseHeartbeat();
+  if (!ticketSweepTimer) startTicketSweep();
 }
 
-function handleWsData(client, buffer) {
-  const messages = decodeWsFrames(buffer);
-  for (const text of messages) {
-    let message;
-    try {
-      message = JSON.parse(text);
-    } catch {
+function startSseHeartbeat() {
+  sseHeartbeatTimer = setInterval(() => {
+    pushEvent({ type: "heartbeat", ts: Date.now() });
+  }, SSE_HEARTBEAT_MS);
+  if (typeof sseHeartbeatTimer.unref === "function") sseHeartbeatTimer.unref();
+}
+
+function startTicketSweep() {
+  ticketSweepTimer = setInterval(sweepExpiredTickets, TICKET_SWEEP_MS);
+  if (typeof ticketSweepTimer.unref === "function") ticketSweepTimer.unref();
+}
+
+function clientShouldReceive(client, message) {
+  if (!client.threadFilter) return true;
+  // Heartbeats and connection-level events have no threadId; deliver to all.
+  if (!message || message.type === "heartbeat" || message.type === "connected") return true;
+  if (!message.threadId) return true;
+  return String(message.threadId) === client.threadFilter;
+}
+
+function pushEvent(message) {
+  sseEventCounter += 1;
+  const id = sseEventCounter;
+  const line = `id: ${id}\ndata: ${JSON.stringify(message)}\n\n`;
+  sseEventBuffer.push({ id, line, message });
+  if (sseEventBuffer.length > SSE_BUFFER_MAX) sseEventBuffer.shift();
+  if (sseClients.size === 0) return;
+  const now = Date.now();
+  for (const client of sseClients) {
+    if (client.sessionExpiresAt && client.sessionExpiresAt < now) {
+      sseClients.delete(client);
+      try { client.res.end(); } catch {}
       continue;
     }
-    if (message.type === "subscribeThread" && message.threadId) {
-      client.subscriptions.add(message.threadId);
-    }
-    if (message.type === "unsubscribeThread" && message.threadId) {
-      client.subscriptions.delete(message.threadId);
+    if (!clientShouldReceive(client, message)) continue;
+    try {
+      client.res.write(line);
+      client.lastWriteAt = now;
+    } catch {
+      sseClients.delete(client);
+      try { client.res.end(); } catch {}
     }
   }
 }
 
 function broadcast(message) {
-  for (const client of wsClients) {
-    if (message.threadId && client.subscriptions.size && !client.subscriptions.has(message.threadId)) continue;
-    wsSend(client, message);
-  }
-}
-
-function wsSend(client, value) {
-  const payload = Buffer.from(JSON.stringify(value));
-  let header;
-  if (payload.length < 126) {
-    header = Buffer.from([0x81, payload.length]);
-  } else if (payload.length < 65536) {
-    header = Buffer.alloc(4);
-    header[0] = 0x81;
-    header[1] = 126;
-    header.writeUInt16BE(payload.length, 2);
-  } else {
-    header = Buffer.alloc(10);
-    header[0] = 0x81;
-    header[1] = 127;
-    header.writeBigUInt64BE(BigInt(payload.length), 2);
-  }
-  client.socket.write(Buffer.concat([header, payload]));
-}
-
-function decodeWsFrames(buffer) {
-  const frames = [];
-  let offset = 0;
-  while (offset + 2 <= buffer.length) {
-    const first = buffer[offset++];
-    const second = buffer[offset++];
-    const opcode = first & 0x0f;
-    const masked = (second & 0x80) !== 0;
-    let length = second & 0x7f;
-    if (length === 126) {
-      length = buffer.readUInt16BE(offset);
-      offset += 2;
-    } else if (length === 127) {
-      length = Number(buffer.readBigUInt64BE(offset));
-      offset += 8;
-    }
-    const mask = masked ? buffer.subarray(offset, offset + 4) : null;
-    if (masked) offset += 4;
-    const payload = buffer.subarray(offset, offset + length);
-    offset += length;
-    if (opcode === 8) break;
-    if (opcode !== 1) continue;
-    const unmasked = Buffer.alloc(payload.length);
-    for (let i = 0; i < payload.length; i++) {
-      unmasked[i] = masked ? payload[i] ^ mask[i % 4] : payload[i];
-    }
-    frames.push(unmasked.toString("utf8"));
-  }
-  return frames;
+  pushEvent(message);
 }
 
 function getLanAddress() {

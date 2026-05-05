@@ -42,9 +42,12 @@ export const state: AnyRecord = {
   projectSearch: "",
   threadSearch: "",
   settings: null,
-  ws: null,
-  wsReconnectTimer: null,
-  wsReconnectAttempts: 0,
+  events: null as EventSource | null,
+  eventsLastMessageAt: 0,
+  eventsLastSeenId: null as string | null,
+  eventsWatchdogTimer: null,
+  eventsConnecting: null as Promise<void> | null,
+  eventsVisibilityInstalled: false,
   approvals: new Map(),
   loginPoll: null,
   desktopReady: false,
@@ -113,13 +116,6 @@ function installViewportListeners() {
   if (viewportListenersInstalled) return;
   viewportListenersInstalled = true;
   const wideQuery = window.matchMedia("(min-width: 1024px)");
-  const syncViewport = () => {
-    const visualViewport = window.visualViewport;
-    const width = Math.max(320, Math.floor(visualViewport?.width || window.innerWidth || document.documentElement.clientWidth));
-    const height = Math.max(320, Math.floor(visualViewport?.height || window.innerHeight || document.documentElement.clientHeight));
-    document.documentElement.style.setProperty("--app-width", `${width}px`);
-    document.documentElement.style.setProperty("--app-height", `${height}px`);
-  };
   const syncSidebar = () => {
     const shouldOpen = wideQuery.matches;
     if (state.sidebarOpen !== shouldOpen) {
@@ -127,12 +123,7 @@ function installViewportListeners() {
       emit();
     }
   };
-  syncViewport();
   syncSidebar();
-  window.addEventListener("resize", syncViewport, { passive: true });
-  window.addEventListener("orientationchange", syncViewport, { passive: true });
-  window.visualViewport?.addEventListener("resize", syncViewport, { passive: true });
-  window.visualViewport?.addEventListener("scroll", syncViewport, { passive: true });
   wideQuery.addEventListener("change", syncSidebar);
 }
 
@@ -388,11 +379,12 @@ async function loadThread(threadId) {
   ]);
   state.thread = mergePendingLocalTurns(result.thread);
   state.selectedThread = state.thread;
+  if (result?.latestEventId) state.eventsLastSeenId = String(result.latestEventId);
   rememberActiveThread(state.thread?.cwd || state.selectedProject?.cwd, threadId);
   state.approvals.clear();
+  connectEvents();
   if (!isWideScreen()) state.sidebarOpen = false;
   renderThread();
-  subscribeThread(threadId);
   Promise.allSettled([
     loadThreadContext(threadId),
     loadBranches(threadId),
@@ -579,6 +571,24 @@ function removeLocalTurn(turnId) {
   state.pendingLocalTurns = state.pendingLocalTurns.filter((turn) => turn.id !== turnId);
 }
 
+function dropMatchingLocalTurn(serverText: string) {
+  if (!state.thread || !serverText) return;
+  const threadId = state.thread.id;
+  const matching = state.pendingLocalTurns.find((turn) => {
+    if (turn.threadId !== threadId) return false;
+    const localText = extractText((turn.items || [])[0]).trim();
+    if (!localText) return false;
+    // Local displayText may include "[file] x" / "[skill] y" annotations after the
+    // first line; the server only echoes the user's prose. Match prefix to cover both.
+    return localText === serverText || localText.startsWith(`${serverText}\n`);
+  });
+  if (!matching) return;
+  state.pendingLocalTurns = state.pendingLocalTurns.filter((turn) => turn.id !== matching.id);
+  if (state.thread.turns) {
+    state.thread.turns = state.thread.turns.filter((turn) => turn.id !== matching.id);
+  }
+}
+
 function mergePendingLocalTurns(thread) {
   if (!thread) return thread;
   const turns = thread.turns || [];
@@ -669,6 +679,15 @@ export function backToWorkspace() {
   emit();
 }
 
+async function searchMentions(cwd: string, query: string, signal?: AbortSignal) {
+  const params = new URLSearchParams({ cwd: cwd || "", query });
+  const headers: AnyRecord = { "content-type": "application/json" };
+  if (state.token) headers.authorization = `Bearer ${state.token}`;
+  const response = await fetch(`/api/mentions?${params.toString()}`, { headers, signal });
+  if (!response.ok) throw new Error("Mention search failed");
+  return response.json();
+}
+
 async function enableNotifications() {
   if (!("Notification" in window)) {
     alert("이 브라우저는 알림을 지원하지 않습니다.");
@@ -717,48 +736,160 @@ async function answerApproval(requestId, decision, remember = false) {
   renderThread();
 }
 
+const EVENTS_STALE_THRESHOLD_MS = 60_000;
+const EVENTS_WATCHDOG_INTERVAL_MS = 15_000;
+
 function connectEvents() {
-  if (state.ws) state.ws.close();
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  state.ws = new WebSocket(`${protocol}//${location.host}/api/events?token=${encodeURIComponent(state.token)}`);
-  state.ws.addEventListener("open", () => {
-    state.wsReconnectAttempts = 0;
-    if (state.thread?.id) subscribeThread(state.thread.id);
+  if (!state.token) return;
+  if (state.eventsConnecting) return;
+  const promise = (async () => {
+    closeEvents();
+    const ticket = await fetchEventsTicket();
+    if (!ticket) return;
+    if (!state.token) return;
+    const threadParam = encodeURIComponent(state.thread?.id ?? "");
+    const lastSeen = state.eventsLastSeenId;
+    const lastEventParam = lastSeen ? `&lastEventId=${encodeURIComponent(lastSeen)}` : "";
+    const url = `/api/events?ticket=${encodeURIComponent(ticket)}&thread=${threadParam}${lastEventParam}`;
+    const source = new EventSource(url);
+    state.events = source;
+    state.eventsLastMessageAt = Date.now();
+    installVisibilityRecovery();
+
+    source.addEventListener("open", () => {
+      if (state.events !== source) return;
+      state.eventsLastMessageAt = Date.now();
+      if (state.thread?.id) {
+        refreshThreadSnapshot(state.thread.id).catch(() => {});
+      }
+    });
+
+    source.addEventListener("message", (event) => {
+      if (state.events !== source) return;
+      state.eventsLastMessageAt = Date.now();
+      // MessageEvent.lastEventId is populated by the browser from each `id:`
+      // line we receive — keep it stashed so a fresh reconnect (after a tab
+      // sleep, route change, etc.) can pass it as ?lastEventId= to recover
+      // any events buffered server-side during the gap.
+      if (event.lastEventId) state.eventsLastSeenId = event.lastEventId;
+      let message;
+      try { message = JSON.parse(event.data); }
+      catch { return; }
+      if (message.type === "heartbeat") return;
+      if (message.type === "approvalRequested") {
+        if (message.threadId && state.thread?.id !== message.threadId) return;
+        state.approvals.set(message.requestId, message);
+        notifyApproval(message);
+        renderThread();
+        return;
+      }
+      if (message.type !== "codexEvent") return;
+      applyCodexEvent(message.event);
+    });
+
+    source.addEventListener("error", () => {
+      if (state.events !== source) return;
+      if (source.readyState === EventSource.CLOSED) {
+        probeEventsAuth().catch(() => {});
+      }
+    });
+
+    ensureEventsWatchdog();
+  })();
+  state.eventsConnecting = promise.finally(() => {
+    if (state.eventsConnecting === promise) state.eventsConnecting = null;
   });
-  state.ws.addEventListener("message", (event) => {
-    const message = JSON.parse(event.data);
-    if (message.type === "approvalRequested") {
-      state.approvals.set(message.requestId, message);
-      notifyApproval(message);
-      renderThread();
-      return;
-    }
-    if (message.type !== "codexEvent") return;
-    applyCodexEvent(message.event);
-  });
-  state.ws.addEventListener("close", scheduleEventReconnect);
-  state.ws.addEventListener("error", scheduleEventReconnect);
 }
 
-function subscribeThread(threadId) {
-  if (state.ws?.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type: "subscribeThread", threadId }));
-  } else {
-    state.ws?.addEventListener("open", () => subscribeThread(threadId), { once: true });
+async function fetchEventsTicket(): Promise<string | null> {
+  if (!state.token) return null;
+  const headers: AnyRecord = { "content-type": "application/json" };
+  headers.authorization = `Bearer ${state.token}`;
+  let response: Response;
+  try {
+    response = await fetch("/api/events/ticket", { method: "POST", headers });
+  } catch {
+    return null;
+  }
+  if (response.status === 401) {
+    forceUnauthenticated();
+    return null;
+  }
+  if (!response.ok) return null;
+  try {
+    const data = await response.json();
+    return data?.ticket || null;
+  } catch {
+    return null;
   }
 }
 
-function scheduleEventReconnect() {
-  if (!state.token || state.wsReconnectTimer) return;
-  const delay = Math.min(10_000, 750 * (2 ** state.wsReconnectAttempts));
-  state.wsReconnectAttempts += 1;
-  state.wsReconnectTimer = window.setTimeout(() => {
-    state.wsReconnectTimer = null;
-    connectEvents();
-    if (state.thread?.id && isThreadBusy()) {
-      refreshThreadSnapshot(state.thread.id).catch(() => {});
+async function probeEventsAuth() {
+  // Re-uses the ticket endpoint as a cheap auth probe; on 401 it routes to pairing.
+  await fetchEventsTicket();
+}
+
+function forceUnauthenticated() {
+  closeEvents();
+  if (state.eventsWatchdogTimer) {
+    window.clearInterval(state.eventsWatchdogTimer);
+    state.eventsWatchdogTimer = null;
+  }
+  localStorage.removeItem("codexMobileToken");
+  state.token = null;
+  state.projects = [];
+  state.threads = [];
+  state.thread = null;
+  state.selectedThread = null;
+  state.selectedProject = null;
+  state.screen = "workspace";
+  state.approvals.clear();
+  emit();
+}
+
+function closeEvents() {
+  if (state.events) {
+    try { state.events.close(); } catch {}
+    state.events = null;
+  }
+}
+
+function ensureEventsWatchdog() {
+  if (state.eventsWatchdogTimer) return;
+  state.eventsWatchdogTimer = window.setInterval(() => {
+    if (!state.token) {
+      window.clearInterval(state.eventsWatchdogTimer);
+      state.eventsWatchdogTimer = null;
+      closeEvents();
+      return;
     }
-  }, delay);
+    const idle = Date.now() - state.eventsLastMessageAt;
+    if (idle > EVENTS_STALE_THRESHOLD_MS) {
+      // Connection looks dead despite EventSource not reporting an error.
+      // Force a fresh connection so the browser performs a clean reconnect.
+      connectEvents();
+    }
+  }, EVENTS_WATCHDOG_INTERVAL_MS);
+}
+
+// Install once: on tab foreground, immediately reconnect SSE if it died while
+// the tab was hidden (browser/OS may close idle sockets, Chrome heavily
+// throttles setInterval so the watchdog can be 30-60s late). HeyTraders
+// pattern.
+function installVisibilityRecovery() {
+  if (state.eventsVisibilityInstalled) return;
+  state.eventsVisibilityInstalled = true;
+  document.addEventListener(
+    "visibilitychange",
+    () => {
+      if (document.hidden || !state.token) return;
+      const source = state.events;
+      const stale = Date.now() - state.eventsLastMessageAt > EVENTS_STALE_THRESHOLD_MS;
+      const dead = !source || source.readyState === EventSource.CLOSED;
+      if (dead || stale) connectEvents();
+    },
+    { passive: true } as AddEventListenerOptions,
+  );
 }
 
 function applyCodexEvent(event) {
@@ -783,6 +914,13 @@ function applyCodexEvent(event) {
       const index = turn.items.findIndex((candidate) => candidate?.id === item?.id);
       if (index >= 0) turn.items[index] = item;
       else turn.items.push(item);
+      // Dedupe: when a server userMessage arrives that matches a pending optimistic
+      // local turn, drop the local turn so the user doesn't see duplicate bubbles.
+      const itemType = String(item?.type || item?.kind || "").toLowerCase();
+      if (itemType === "usermessage" || itemType === "user_message" || itemType === "message/user") {
+        const serverText = extractText(item).trim();
+        if (serverText) dropMatchingLocalTurn(serverText);
+      }
     }
   }
 
@@ -804,6 +942,7 @@ function applyCodexEvent(event) {
   }
 
   if (event.method === "turn/completed") {
+    if (!state.thread || state.thread.id !== event.params?.threadId) return;
     const turn = turns.find((candidate) => candidate?.id === event.params.turnId);
     if (turn) turn.status = event.params.turn?.status || "completed";
     state.pendingLocalTurns = state.pendingLocalTurns.filter((candidate) => candidate.threadId !== state.thread.id);
@@ -815,6 +954,7 @@ function applyCodexEvent(event) {
   }
 
   if (event.method === "turn/diff/updated") {
+    if (!state.thread || state.thread.id !== event.params?.threadId) return;
     state.changes = {
       ...(state.changes || {}),
       threadId: event.params.threadId,
@@ -839,14 +979,17 @@ function applyCodexEvent(event) {
   }
 
   if (event.method === "thread/status/changed") {
+    if (!state.thread || state.thread.id !== event.params?.threadId) return;
     state.thread.status = event.params.status || event.params.thread?.status || state.thread.status;
   }
 
   if (event.method === "thread/name/updated") {
+    if (!state.thread || state.thread.id !== event.params?.threadId) return;
     state.thread.name = event.params.name || state.thread.name;
   }
 
   if (event.method === "thread/compacted") {
+    if (!state.thread || state.thread.id !== event.params?.threadId) return;
     loadThread(state.thread.id).catch(() => {});
   }
 
@@ -905,6 +1048,7 @@ async function refreshThreadSnapshot(threadId) {
   if (state.thread?.id !== threadId) return;
   state.thread = mergePendingLocalTurns(result.thread);
   state.selectedThread = state.thread;
+  if (result?.latestEventId) state.eventsLastSeenId = String(result.latestEventId);
   renderThread({ timelineOnly: isComposerFocused() && state.activeTab === "chat" });
 }
 
@@ -2757,6 +2901,7 @@ export const mobileController = {
   editQueuedMessage,
   uploadAttachments,
   renderCurrentView,
+  searchMentions,
 };
 
 export const mobileSelectors = {
