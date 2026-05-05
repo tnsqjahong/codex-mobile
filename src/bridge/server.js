@@ -1089,6 +1089,8 @@ function sendJson(res, status, value) {
   res.end(body);
 }
 
+const PWA_FILES = new Set(["/sw.js", "/manifest.webmanifest", "/registerSW.js"]);
+
 async function serveStatic(req, res, url) {
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === "/") pathname = "/index.html";
@@ -1101,13 +1103,32 @@ async function serveStatic(req, res, url) {
   }
   try {
     const data = await fs.readFile(target);
-    res.writeHead(200, { "content-type": contentType(target) });
+    res.writeHead(200, {
+      "content-type": contentType(target),
+      ...cacheHeadersFor(pathname),
+    });
     res.end(data);
   } catch {
+    if (PWA_FILES.has(pathname) || /^\/workbox-[\w-]+\.js$/.test(pathname)) {
+      res.writeHead(404);
+      res.end("Not Found");
+      return;
+    }
     const data = await fs.readFile(path.join(staticDir, "index.html"));
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-cache",
+    });
     res.end(data);
   }
+}
+
+function cacheHeadersFor(pathname) {
+  if (pathname === "/index.html") return { "cache-control": "no-cache" };
+  if (pathname === "/sw.js") return { "cache-control": "no-cache, no-store, must-revalidate" };
+  if (pathname === "/manifest.webmanifest") return { "cache-control": "public, max-age=3600" };
+  if (pathname.startsWith("/assets/")) return { "cache-control": "public, max-age=31536000, immutable" };
+  return {};
 }
 
 async function directoryExists(dir) {
@@ -1128,6 +1149,7 @@ function contentType(file) {
   if (lower.endsWith(".webp")) return "image/webp";
   if (lower.endsWith(".heic") || lower.endsWith(".heif")) return "image/heic";
   if (lower.endsWith(".ico")) return "image/x-icon";
+  if (lower.endsWith(".webmanifest")) return "application/manifest+json; charset=utf-8";
   return "application/octet-stream";
 }
 
