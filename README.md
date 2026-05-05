@@ -138,29 +138,37 @@ If you want a permanent URL so the PWA installs once and survives desktop
 restarts, expose the bridge through a stable origin and pass it via
 `PUBLIC_URL`. Recommended free setup:
 
-### Tailscale Funnel
+### Tailscale Funnel (automated)
 
 One-time setup on the desktop:
 
 1. Install Tailscale and sign in with any account (Google/GitHub/etc).
-2. Enable Funnel for the bridge port:
+2. Run `npm run setup`. The doctor checks for the Tailscale CLI and login,
+   detects whether Funnel is already enabled for the bridge port, and — if
+   not — offers to enable it for you (sudo password required, one prompt):
 
-   ```sh
-   sudo tailscale funnel --bg 8787
+   ```text
+   Tailscale Funnel (optional, for stable PWA URL):
+     Funnel for port 8787 is not configured (device: my-mac.tail-xxxx.ts.net).
+            Enable now (sudo password required)? [y/N] y
+     OK   Funnel enabled at https://my-mac.tail-xxxx.ts.net
    ```
 
-3. Note the URL Tailscale prints, e.g. `https://my-mac.tail-xxxx.ts.net`.
-4. Add it to your shell profile so `npm start` picks it up:
+3. Done. From now on, `npm start` automatically detects the active Funnel
+   and uses its URL for the mobile QR — no `PUBLIC_URL` env var needed.
 
-   ```sh
-   export PUBLIC_URL=https://my-mac.tail-xxxx.ts.net
-   ```
+To enable manually instead, run `sudo tailscale funnel --bg 8787` once.
 
-Now `npm start` skips the temporary tunnel and the QR points at your
-permanent URL. Open it on your phone, complete pairing, then **Add to Home
+Open the QR'd URL on your phone, complete pairing, then **Add to Home
 Screen** (iOS Safari) or tap **Install** when the in-app prompt appears
 (Android Chrome). The icon survives desktop restarts; only the per-session
 pairing token is renewed on next launch.
+
+### Override priority
+
+`PUBLIC_URL` env var > detected Tailscale Funnel > Cloudflare quick tunnel.
+Set `PUBLIC_URL` only if you want to pin the QR to a different stable
+origin (e.g. Cloudflare named tunnel on your own domain).
 
 ### Notes
 
