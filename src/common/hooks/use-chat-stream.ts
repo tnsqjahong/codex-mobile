@@ -34,6 +34,6 @@ export function useChatStream(state: Record<string, any>): ChatStream {
     approvals,
     isBusy: mobileSelectors.isThreadBusy(),
     hasThread: Boolean(state.thread),
-    startPending: state.startPendingMessage ?? null,
+    startPending: state.thread ? null : state.startPendingMessage ?? null,
   }
 }

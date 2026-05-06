@@ -26,12 +26,15 @@ const SSE_HEARTBEAT_MS = 25_000;
 const TICKET_SWEEP_MS = 60_000;
 const TICKET_TTL_MS = 30_000;
 const SSE_BUFFER_MAX = 500;
+const EVENT_LOOKUP_MAX = 2_000;
 let sseEventCounter = 0;
 const sseEventBuffer = [];
 const tickets = new Map();
 const pairings = new Map();
 const sessions = new Map();
 const activeTurns = new Map();
+const turnThreads = new Map();
+const itemThreads = new Map();
 const diffSnapshots = new Map();
 const tokenUsageSnapshots = new Map();
 const responseCache = new Map();
@@ -811,26 +814,43 @@ function mapApprovalDecision(decision, remember) {
 
 function trackTurn(message) {
   const params = message.params || {};
-  if (message.method === "turn/started" && params.threadId && params.turn?.id) {
-    activeTurns.set(params.threadId, params.turn.id);
+  const threadId = extractThreadId(message);
+  const turnId = params.turnId || params.turn?.id || params.item?.turnId || null;
+  const itemId = params.itemId || params.item?.id || null;
+
+  if (threadId && turnId) {
+    rememberEventLookup(turnThreads, String(turnId), threadId);
   }
-  if (message.method === "turn/completed" && params.threadId) {
-    activeTurns.delete(params.threadId);
+  if (threadId && itemId) {
+    rememberEventLookup(itemThreads, String(itemId), threadId);
   }
-  if (message.method === "turn/diff/updated" && params.threadId) {
-    diffSnapshots.set(params.threadId, {
+  if (message.method === "turn/started" && threadId && turnId) {
+    activeTurns.set(threadId, turnId);
+  }
+  if (message.method === "turn/completed" && threadId) {
+    activeTurns.delete(threadId);
+  }
+  if (message.method === "turn/diff/updated" && threadId) {
+    diffSnapshots.set(threadId, {
       turnId: params.turnId,
       diff: redact(params.diff || ""),
       updatedAt: Date.now(),
     });
   }
-  if (message.method === "thread/tokenUsage/updated" && params.threadId) {
-    tokenUsageSnapshots.set(params.threadId, {
+  if (message.method === "thread/tokenUsage/updated" && threadId) {
+    tokenUsageSnapshots.set(threadId, {
       turnId: params.turnId || null,
       tokenUsage: params.tokenUsage || null,
       updatedAt: Date.now(),
     });
   }
+}
+
+function rememberEventLookup(map, key, value) {
+  map.set(key, value);
+  if (map.size <= EVENT_LOOKUP_MAX) return;
+  const oldest = map.keys().next().value;
+  if (oldest) map.delete(oldest);
 }
 
 function findActiveTurnId(thread) {
@@ -845,7 +865,13 @@ function findActiveTurnId(thread) {
 
 function extractThreadId(message) {
   const params = message.params || {};
-  return params.threadId || params.thread?.id || params.item?.threadId || null;
+  const directThreadId = params.threadId || params.thread?.id || params.item?.threadId || null;
+  if (directThreadId) return directThreadId;
+  const turnId = params.turnId || params.turn?.id || params.item?.turnId || null;
+  if (turnId && turnThreads.has(String(turnId))) return turnThreads.get(String(turnId));
+  const itemId = params.itemId || params.item?.id || null;
+  if (itemId && itemThreads.has(String(itemId))) return itemThreads.get(String(itemId));
+  return null;
 }
 
 function isAuthorized(req, url = null) {
@@ -1234,6 +1260,9 @@ function handleSseEvents(req, res, url) {
     // disables proxy buffering (nginx, cloudflared) so chunks flush immediately
     "X-Accel-Buffering": "no",
   });
+  res.flushHeaders?.();
+  res.socket?.setNoDelay?.(true);
+  res.socket?.setKeepAlive?.(true);
   // Hint to EventSource: retry after 3s if disconnected
   res.write("retry: 3000\n\n");
   res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);

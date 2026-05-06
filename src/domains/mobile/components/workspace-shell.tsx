@@ -1,6 +1,6 @@
-import { FolderOpen, MessageSquare, PanelLeft, PanelLeftOpen, Share2, Sparkles } from "lucide-react"
+import { FolderOpen, MessageSquare, PanelLeft, PanelLeftOpen, RefreshCw, Share2, Sparkles } from "lucide-react"
 
-import { patchState } from "@/domains/mobile/runtime/controller"
+import { mobileController, patchState } from "@/domains/mobile/runtime/controller"
 import { Button } from "@/common/ui/button"
 import { cn } from "@/common/lib/utils"
 import { useWorkspaceHeader } from "@/common/hooks/use-workspace-header"
@@ -130,6 +130,22 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
                   </button>
                 </div>
               ) : null}
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="rounded-md hover:bg-[var(--row-hover)]"
+                aria-label="Refresh chat"
+                title="Refresh chat"
+                onClick={() => void mobileController.refreshRealtime()}
+                disabled={!state.thread || state.realtimeRefreshing}
+              >
+                <RefreshCw
+                  className={cn(
+                    "size-4 text-[var(--muted-text)]",
+                    state.realtimeRefreshing && "animate-spin",
+                  )}
+                />
+              </Button>
               <Button
                 variant="ghost"
                 size="icon-sm"
