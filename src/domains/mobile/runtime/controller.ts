@@ -44,10 +44,14 @@ export const state: AnyRecord = {
   settings: null,
   events: null as EventSource | null,
   eventsLastMessageAt: 0,
+  eventsLastCodexAt: 0,
   eventsLastSeenId: null as string | null,
   eventsWatchdogTimer: null,
+  eventsReconnectTimer: null,
   eventsConnecting: null as Promise<void> | null,
+  eventsConnectionSeq: 0,
   eventsVisibilityInstalled: false,
+  eventsStatus: "idle",
   approvals: new Map(),
   loginPoll: null,
   desktopReady: false,
@@ -61,6 +65,11 @@ export const state: AnyRecord = {
   threadsLoading: false,
   threadRefreshTimer: null,
   threadRefreshAttempts: 0,
+  threadRefreshStartedAt: 0,
+  threadSnapshotSeq: 0,
+  realtimeRefreshing: false,
+  realtimeError: "",
+  realtimeLastSyncedAt: 0,
   followTail: true,
   messageQueue: [],
   pendingLocalTurns: [],
@@ -385,6 +394,7 @@ async function loadThread(threadId) {
   connectEvents();
   if (!isWideScreen()) state.sidebarOpen = false;
   renderThread();
+  if (isThreadBusy()) scheduleThreadRefresh(threadId);
   Promise.allSettled([
     loadThreadContext(threadId),
     loadBranches(threadId),
@@ -571,22 +581,59 @@ function removeLocalTurn(turnId) {
   state.pendingLocalTurns = state.pendingLocalTurns.filter((turn) => turn.id !== turnId);
 }
 
+function isUserMessageType(value) {
+  const type = String(value || "").toLowerCase();
+  return type === "usermessage" || type === "user_message" || type === "message/user";
+}
+
+function isAgentMessageType(value) {
+  const type = String(value || "").toLowerCase();
+  return type === "agentmessage" || type === "agent_message" || type === "message/agent";
+}
+
+function isLocalEchoMatch(localText, serverText) {
+  const local = String(localText || "").trim();
+  const server = String(serverText || "").trim();
+  if (!local || !server) return false;
+  if (local === server) return true;
+  return local.startsWith(`${server}\n`) || server.startsWith(`${local}\n`);
+}
+
 function dropMatchingLocalTurn(serverText: string) {
   if (!state.thread || !serverText) return;
   const threadId = state.thread.id;
   const matching = state.pendingLocalTurns.find((turn) => {
     if (turn.threadId !== threadId) return false;
     const localText = extractText((turn.items || [])[0]).trim();
-    if (!localText) return false;
-    // Local displayText may include "[file] x" / "[skill] y" annotations after the
-    // first line; the server only echoes the user's prose. Match prefix to cover both.
-    return localText === serverText || localText.startsWith(`${serverText}\n`);
+    return isLocalEchoMatch(localText, serverText);
   });
   if (!matching) return;
   state.pendingLocalTurns = state.pendingLocalTurns.filter((turn) => turn.id !== matching.id);
   if (state.thread.turns) {
     state.thread.turns = state.thread.turns.filter((turn) => turn.id !== matching.id);
   }
+}
+
+function mergeLiveThreadSnapshot(nextThread) {
+  if (!nextThread || state.thread?.id !== nextThread.id) return nextThread;
+  const currentItemsById = new Map();
+  for (const turn of state.thread.turns || []) {
+    for (const item of turn?.items || []) {
+      if (item?.id) currentItemsById.set(item.id, item);
+    }
+  }
+  for (const turn of nextThread.turns || []) {
+    for (const item of turn?.items || []) {
+      if (!item?.id || !isAgentMessageType(item?.type || item?.kind)) continue;
+      const current = currentItemsById.get(item.id);
+      const currentText = extractText(current);
+      const nextText = extractText(item);
+      if (currentText && currentText.length > nextText.length && currentText.startsWith(nextText)) {
+        item.text = currentText;
+      }
+    }
+  }
+  return nextThread;
 }
 
 function mergePendingLocalTurns(thread) {
@@ -598,7 +645,10 @@ function mergePendingLocalTurns(thread) {
     if (turn.threadId !== thread.id) return true;
     const text = extractText((turn.items || [])[0]).trim();
     const matched = text && turns.some((candidate) =>
-      (candidate.items || []).some((item) => String(item?.type || item?.kind || "") === "userMessage" && extractText(item).trim() === text)
+      (candidate.items || []).some((item) =>
+        isUserMessageType(item?.type || item?.kind) &&
+        isLocalEchoMatch(text, extractText(item).trim())
+      )
     );
     if (matched || now - Number(turn.createdAt || 0) > 120_000) return false;
     pendingForThread.push(turn);
@@ -739,30 +789,48 @@ async function answerApproval(requestId, decision, remember = false) {
 
 const EVENTS_STALE_THRESHOLD_MS = 60_000;
 const EVENTS_WATCHDOG_INTERVAL_MS = 15_000;
+const EVENTS_TICKET_TIMEOUT_MS = 8_000;
+const THREAD_REFRESH_FAST_INTERVAL_MS = 1_500;
+const THREAD_REFRESH_SLOW_INTERVAL_MS = 5_000;
+const THREAD_REFRESH_FAST_ATTEMPTS = 24;
+const THREAD_REFRESH_MAX_MS = 20 * 60_000;
 
-function connectEvents() {
+function connectEvents({ force = false } = {}) {
   if (!state.token) return;
-  if (state.eventsConnecting) return;
+  if (state.eventsConnecting && !force) return;
+  const connectionSeq = Number(state.eventsConnectionSeq || 0) + 1;
+  state.eventsConnectionSeq = connectionSeq;
   const promise = (async () => {
+    clearEventsReconnectTimer();
     closeEvents();
+    state.eventsStatus = "connecting";
     const ticket = await fetchEventsTicket();
-    if (!ticket) return;
+    if (state.eventsConnectionSeq !== connectionSeq) return;
+    if (!ticket) {
+      scheduleEventsReconnect(1500);
+      return;
+    }
     if (!state.token) return;
-    const threadParam = encodeURIComponent(state.thread?.id ?? "");
     const lastSeen = state.eventsLastSeenId;
     const lastEventParam = lastSeen ? `&lastEventId=${encodeURIComponent(lastSeen)}` : "";
-    const url = `/api/events?ticket=${encodeURIComponent(ticket)}&thread=${threadParam}${lastEventParam}`;
+    const url = `/api/events?ticket=${encodeURIComponent(ticket)}${lastEventParam}`;
     const source = new EventSource(url);
+    if (state.eventsConnectionSeq !== connectionSeq) {
+      source.close();
+      return;
+    }
     state.events = source;
     state.eventsLastMessageAt = Date.now();
     installVisibilityRecovery();
 
     source.addEventListener("open", () => {
       if (state.events !== source) return;
+      state.eventsStatus = "open";
       state.eventsLastMessageAt = Date.now();
       if (state.thread?.id) {
         refreshThreadSnapshot(state.thread.id).catch(() => {});
       }
+      renderThread();
     });
 
     source.addEventListener("message", (event) => {
@@ -785,20 +853,26 @@ function connectEvents() {
         return;
       }
       if (message.type !== "codexEvent") return;
-      applyCodexEvent(message.event);
+      state.eventsLastCodexAt = Date.now();
+      const codexEvent = message.event || {};
+      codexEvent.params ||= {};
+      if (!codexEvent.params.threadId && message.threadId) codexEvent.params.threadId = message.threadId;
+      applyCodexEvent(codexEvent);
     });
 
     source.addEventListener("error", () => {
       if (state.events !== source) return;
-      if (source.readyState === EventSource.CLOSED) {
-        probeEventsAuth().catch(() => {});
-      }
+      const wasClosed = source.readyState === EventSource.CLOSED;
+      state.eventsStatus = "error";
+      closeEvents();
+      scheduleEventsReconnect(wasClosed ? 300 : 1200);
+      renderThread();
     });
 
     ensureEventsWatchdog();
   })();
   state.eventsConnecting = promise.finally(() => {
-    if (state.eventsConnecting === promise) state.eventsConnecting = null;
+    if (state.eventsConnecting === promise && state.eventsConnectionSeq === connectionSeq) state.eventsConnecting = null;
   });
 }
 
@@ -806,11 +880,15 @@ async function fetchEventsTicket(): Promise<string | null> {
   if (!state.token) return null;
   const headers: AnyRecord = { "content-type": "application/json" };
   headers.authorization = `Bearer ${state.token}`;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), EVENTS_TICKET_TIMEOUT_MS);
   let response: Response;
   try {
-    response = await fetch("/api/events/ticket", { method: "POST", headers });
+    response = await fetch("/api/events/ticket", { method: "POST", headers, signal: controller.signal });
   } catch {
     return null;
+  } finally {
+    window.clearTimeout(timeout);
   }
   if (response.status === 401) {
     forceUnauthenticated();
@@ -825,12 +903,24 @@ async function fetchEventsTicket(): Promise<string | null> {
   }
 }
 
-async function probeEventsAuth() {
-  // Re-uses the ticket endpoint as a cheap auth probe; on 401 it routes to pairing.
-  await fetchEventsTicket();
+function clearEventsReconnectTimer() {
+  if (!state.eventsReconnectTimer) return;
+  window.clearTimeout(state.eventsReconnectTimer);
+  state.eventsReconnectTimer = null;
+}
+
+function scheduleEventsReconnect(delay = 1000) {
+  if (!state.token || state.eventsReconnectTimer) return;
+  state.eventsStatus = "reconnecting";
+  state.eventsReconnectTimer = window.setTimeout(() => {
+    state.eventsReconnectTimer = null;
+    connectEvents({ force: true });
+  }, delay);
+  renderThread();
 }
 
 function forceUnauthenticated() {
+  clearEventsReconnectTimer();
   closeEvents();
   if (state.eventsWatchdogTimer) {
     window.clearInterval(state.eventsWatchdogTimer);
@@ -844,6 +934,7 @@ function forceUnauthenticated() {
   state.selectedThread = null;
   state.selectedProject = null;
   state.screen = "workspace";
+  state.eventsStatus = "idle";
   state.approvals.clear();
   emit();
 }
@@ -868,7 +959,8 @@ function ensureEventsWatchdog() {
     if (idle > EVENTS_STALE_THRESHOLD_MS) {
       // Connection looks dead despite EventSource not reporting an error.
       // Force a fresh connection so the browser performs a clean reconnect.
-      connectEvents();
+      closeEvents();
+      connectEvents({ force: true });
     }
   }, EVENTS_WATCHDOG_INTERVAL_MS);
 }
@@ -887,7 +979,10 @@ function installVisibilityRecovery() {
       const source = state.events;
       const stale = Date.now() - state.eventsLastMessageAt > EVENTS_STALE_THRESHOLD_MS;
       const dead = !source || source.readyState === EventSource.CLOSED;
-      if (dead || stale) connectEvents();
+      if (dead || stale) {
+        closeEvents();
+        connectEvents({ force: true });
+      }
     },
     { passive: true } as AddEventListenerOptions,
   );
@@ -917,8 +1012,7 @@ function applyCodexEvent(event) {
       else turn.items.push(item);
       // Dedupe: when a server userMessage arrives that matches a pending optimistic
       // local turn, drop the local turn so the user doesn't see duplicate bubbles.
-      const itemType = String(item?.type || item?.kind || "").toLowerCase();
-      if (itemType === "usermessage" || itemType === "user_message" || itemType === "message/user") {
+      if (isUserMessageType(item?.type || item?.kind)) {
         const serverText = extractText(item).trim();
         if (serverText) dropMatchingLocalTurn(serverText);
       }
@@ -1020,13 +1114,15 @@ function scheduleRenderAfterEvent({ immediate = false } = {}) {
 function scheduleThreadRefresh(threadId) {
   stopThreadRefresh();
   state.threadRefreshAttempts = 0;
-  state.threadRefreshTimer = window.setInterval(async () => {
+  state.threadRefreshStartedAt = Date.now();
+
+  const tick = async () => {
     if (!state.thread || state.thread.id !== threadId) {
       stopThreadRefresh();
       return;
     }
     state.threadRefreshAttempts += 1;
-    if (state.threadRefreshAttempts > 24) {
+    if (Date.now() - Number(state.threadRefreshStartedAt || 0) > THREAD_REFRESH_MAX_MS) {
       stopThreadRefresh();
       return;
     }
@@ -1034,23 +1130,71 @@ function scheduleThreadRefresh(threadId) {
     if (isThreadIdle(state.thread)) {
       stopThreadRefresh();
       setTimeout(() => flushMessageQueue({ force: true }), 0);
+      return;
     }
-  }, 1500);
+    const source = state.events;
+    const eventsStale = Date.now() - Number(state.eventsLastMessageAt || 0) > EVENTS_STALE_THRESHOLD_MS;
+    const eventsDead = !source || source.readyState === EventSource.CLOSED;
+    if (eventsDead || eventsStale) {
+      connectEvents({ force: true });
+    }
+    const delay = state.threadRefreshAttempts < THREAD_REFRESH_FAST_ATTEMPTS
+      ? THREAD_REFRESH_FAST_INTERVAL_MS
+      : THREAD_REFRESH_SLOW_INTERVAL_MS;
+    state.threadRefreshTimer = window.setTimeout(tick, delay);
+  };
+
+  state.threadRefreshTimer = window.setTimeout(tick, THREAD_REFRESH_FAST_INTERVAL_MS);
 }
 
 function stopThreadRefresh() {
-  if (state.threadRefreshTimer) window.clearInterval(state.threadRefreshTimer);
+  if (state.threadRefreshTimer) window.clearTimeout(state.threadRefreshTimer);
   state.threadRefreshTimer = null;
+  state.threadRefreshStartedAt = 0;
   updateComposerSendMode();
 }
 
 async function refreshThreadSnapshot(threadId) {
+  const snapshotSeq = Number(state.threadSnapshotSeq || 0) + 1;
+  state.threadSnapshotSeq = snapshotSeq;
   const result = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}`);
+  if (state.threadSnapshotSeq !== snapshotSeq) return;
   if (state.thread?.id !== threadId) return;
-  state.thread = mergePendingLocalTurns(result.thread);
+  state.thread = mergePendingLocalTurns(mergeLiveThreadSnapshot(result.thread));
   state.selectedThread = state.thread;
   if (result?.latestEventId) state.eventsLastSeenId = String(result.latestEventId);
+  state.realtimeLastSyncedAt = Date.now();
   renderThread({ timelineOnly: isComposerFocused() && state.activeTab === "chat" });
+}
+
+async function refreshRealtime() {
+  if (!state.thread?.id || state.realtimeRefreshing) return;
+  const threadId = state.thread.id;
+  state.realtimeRefreshing = true;
+  state.realtimeError = "";
+  clearEventsReconnectTimer();
+  closeEvents();
+  renderThread();
+
+  try {
+    await refreshThreadSnapshot(threadId);
+    await Promise.allSettled([
+      loadChanges(threadId, { silent: true }),
+      loadBranches(threadId),
+      loadTokenUsage(threadId),
+    ]);
+    if (state.thread?.id === threadId && !isThreadIdle(state.thread)) {
+      scheduleThreadRefresh(threadId);
+    }
+    connectEvents({ force: true });
+    state.realtimeLastSyncedAt = Date.now();
+  } catch (error) {
+    state.realtimeError = String(error.message || error);
+    connectEvents({ force: true });
+  } finally {
+    state.realtimeRefreshing = false;
+    renderThread();
+  }
 }
 
 function isThreadIdle(thread) {
@@ -2557,11 +2701,37 @@ function splitMarkdownRow(row) {
 function renderInlineMarkdown(value) {
   const escaped = escapeHtml(value);
   return escaped
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_match, label, href) => `<a href="${escapeAttr(href)}" target="_blank" rel="noreferrer">${label}</a>`)
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, href) => renderMarkdownLink(label, href))
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_]+)__/g, "<strong>$1</strong>")
     .replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+}
+
+function renderMarkdownLink(label, href) {
+  if (/^https?:\/\//i.test(href)) {
+    return `<a href="${escapeAttr(href)}" target="_blank" rel="noreferrer">${label}</a>`;
+  }
+  if (isLocalMarkdownHref(href)) {
+    const display = formatLocalMarkdownLinkLabel(label, href);
+    return `<code class="code-ref" title="${escapeAttr(href)}">${display}</code>`;
+  }
+  return label;
+}
+
+function isLocalMarkdownHref(href) {
+  const value = String(href || "");
+  return value.startsWith("/") || value.startsWith("./") || value.startsWith("../") || value.startsWith("~");
+}
+
+function formatLocalMarkdownLinkLabel(label, href) {
+  const rawLabel = String(label || "").trim();
+  const readableLabel = rawLabel && !/[\\/]/.test(rawLabel) && rawLabel.length <= 48
+    ? rawLabel
+    : pathBasename(href);
+  const line = String(href || "").match(/:(\d+)(?::\d+)?$/)?.[1];
+  if (line && !new RegExp(`:${line}$`).test(readableLabel)) return `${readableLabel}:${line}`;
+  return readableLabel || pathBasename(href);
 }
 
 function renderAttachmentPreviews(attachments = []) {
@@ -2889,6 +3059,7 @@ export const mobileController = {
   loadSettings,
   backToWorkspace,
   loadChanges,
+  refreshRealtime,
   loadBranches,
   loadTokenUsage,
   loadSkills,

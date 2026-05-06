@@ -43,11 +43,7 @@ export function Composer({ state }: { state: Record<string, any> }) {
     <div
       className="w-full max-w-full px-3 pt-1"
       style={{
-        // Android Chrome chin 애니메이션이 layout thrash 일으키지 않도록
-        // safe-area-max-inset-bottom(정적 max)을 우선, iOS는 inner fallback으로
-        // safe-area-inset-bottom(notched=34px, 그 외 0)을 사용. 최소 8px 보장.
-        paddingBottom:
-          "max(env(safe-area-max-inset-bottom, env(safe-area-inset-bottom, 0px)), 0.5rem)",
+        paddingBottom: "var(--composer-bottom-padding, max(env(safe-area-inset-bottom, 0px), 0.5rem))",
       }}
     >
       {composer.attachments.length ? (
@@ -76,17 +72,20 @@ export function Composer({ state }: { state: Record<string, any> }) {
         onSubmit={composer.onSubmit}
       >
         <ComposerSuggestions view={suggestions} />
-        <Textarea
-          ref={textareaRef}
-          id="message-input"
-          value={composer.draftText}
-          onChange={(event) => composer.onDraftChange(event.target.value)}
-          onKeyDown={suggestions.onKeyDown}
-          onSelect={suggestions.onSelectionChange}
-          onBlur={suggestions.dismiss}
-          placeholder={composer.thread ? "Codex에게 메시지 보내기" : "Codex에게 무엇을 도와줄지 설명해보세요"}
-          className="min-h-[56px] resize-none rounded-xl border-0 bg-transparent px-2.5 py-2 text-[14.5px] leading-relaxed shadow-none placeholder:text-[var(--muted-text-soft)] focus-visible:ring-0"
-        />
+        <div className="composer-input-grow" data-replicated-value={composer.draftText || " "}>
+          <Textarea
+            ref={textareaRef}
+            id="message-input"
+            value={composer.draftText}
+            onChange={(event) => composer.onDraftChange(event.target.value)}
+            onKeyDown={suggestions.onKeyDown}
+            onSelect={suggestions.onSelectionChange}
+            onBlur={suggestions.dismiss}
+            placeholder={composer.thread ? "Codex에게 메시지 보내기" : "Codex에게 무엇을 도와줄지 설명해보세요"}
+            rows={1}
+            className="h-full min-h-[56px] resize-none rounded-xl border-0 bg-transparent px-2.5 py-2 text-[16px] leading-relaxed shadow-none placeholder:text-[var(--muted-text-soft)] focus-visible:ring-0"
+          />
+        </div>
 
         <div className="mt-1 flex min-w-0 flex-nowrap items-center justify-between gap-1.5 px-1.5">
           {/* left actions */}
