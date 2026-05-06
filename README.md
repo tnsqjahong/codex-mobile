@@ -5,7 +5,7 @@ Mobile companion for using the local Codex session layer from a phone.
 This project intentionally uses **local-session mode** only:
 
 - `npm start` opens a desktop pairing page and creates a temporary HTTPS tunnel when possible.
-- The QR code pairs a phone for the lifetime of the desktop companion process.
+- The QR code pairs a phone with an in-memory session token. The token is valid for 7 days while the desktop companion process stays alive and is refreshed as the phone uses the app.
 - If the desktop companion/tunnel restarts, the user scans a fresh QR.
 - No hosted relay, paid domain, ngrok account, or long-lived remote service is required.
 - Notifications are session notifications: they work while the mobile browser remains connected to the desktop bridge.
@@ -142,8 +142,13 @@ restarts, expose the bridge through a stable origin and pass it via
 
 One-time setup on the desktop:
 
-1. Install Tailscale and sign in with any account (Google/GitHub/etc).
-2. Run `npm run setup`. The doctor checks for the Tailscale CLI and login,
+1. Run `npm run setup`. On macOS, if Tailscale is missing and Homebrew is
+   available, setup offers to install it with `brew install --cask tailscale`.
+   Otherwise it prints the manual download link.
+2. Sign in to Tailscale with any account (Google/GitHub/etc). Setup opens the
+   Tailscale app when it can, then asks you to re-run `npm run setup` after
+   login.
+3. The doctor checks for the Tailscale CLI and login,
    detects whether Funnel is already enabled for the bridge port, and — if
    not — offers to enable it for you (sudo password required, one prompt):
 
@@ -154,8 +159,11 @@ One-time setup on the desktop:
      OK   Funnel enabled at https://my-mac.tail-xxxx.ts.net
    ```
 
-3. Done. From now on, `npm start` automatically detects the active Funnel
-   and uses its URL for the mobile QR — no `PUBLIC_URL` env var needed.
+4. Done. From now on, `npm start` automatically detects the active Funnel
+   and uses its URL for the mobile QR — no `PUBLIC_URL` env var needed. If
+   Tailscale is already installed and logged in but Funnel is not configured,
+   `npm start` also attempts to enable Funnel automatically before falling
+   back to a temporary Cloudflare URL.
 
 To enable manually instead, run `sudo tailscale funnel --bg 8787` once.
 
@@ -174,8 +182,9 @@ origin (e.g. Cloudflare named tunnel on your own domain).
 
 - Tailscale Funnel is free on the Personal plan (April 2026 update: 6 users,
   unlimited devices, Funnel included).
-- The pairing token is still per-session; this only fixes the URL, not the
-  token. Long-lived device tokens are tracked as future work.
+- The pairing token is still stored in the running desktop bridge process, so
+  restarting the companion requires pairing again. While the process stays
+  alive, active mobile sessions are refreshed for up to 7 days.
 - Tailscale Funnel exposes the URL publicly. The pairing-token check still
   gates every API call, identical to the temporary tunnel mode.
 

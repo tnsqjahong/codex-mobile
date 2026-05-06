@@ -14,6 +14,39 @@ export async function tailscaleAvailable() {
   }
 }
 
+export async function homebrewAvailable() {
+  if (process.platform !== "darwin") return false;
+  try {
+    await execFile("brew", ["--version"], { timeout: CLI_TIMEOUT_MS });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function installTailscaleWithHomebrew() {
+  return new Promise((resolve, reject) => {
+    const child = spawn("brew", ["install", "--cask", "tailscale"], {
+      stdio: "inherit",
+    });
+    child.on("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`brew install --cask tailscale exited with code ${code}`));
+    });
+    child.on("error", reject);
+  });
+}
+
+export async function openTailscaleApp() {
+  if (process.platform !== "darwin") return false;
+  try {
+    await execFile("open", ["-a", "Tailscale"], { timeout: CLI_TIMEOUT_MS });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function tailscaleStatus() {
   try {
     const { stdout } = await execFile("tailscale", ["status", "--json"], { timeout: CLI_TIMEOUT_MS });

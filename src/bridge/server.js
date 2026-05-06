@@ -40,6 +40,8 @@ const CACHE_TTL_MS = 120_000;
 const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 const UPLOAD_ROOT = path.join(os.tmpdir(), "codex-mobile-uploads");
 const PREVIEW_TTL_MS = 12 * 60 * 60 * 1000;
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SESSION_TOUCH_INTERVAL_MS = 10 * 60 * 1000;
 let publicBaseUrlOverride = process.env.PUBLIC_URL?.replace(/\/$/, "") || null;
 let loginProcess = null;
 let loginFlow = {
@@ -212,8 +214,8 @@ async function handleApi(req, res, url) {
     }
     pairings.delete(body.code);
     const token = crypto.randomBytes(32).toString("base64url");
-    const expiresAt = Date.now() + 12 * 60 * 60 * 1000;
-    sessions.set(token, { deviceName: body.deviceName || "Mobile", expiresAt });
+    const expiresAt = Date.now() + SESSION_TTL_MS;
+    sessions.set(token, { deviceName: body.deviceName || "Mobile", expiresAt, lastSeenAt: Date.now() });
     sendJson(res, 200, { accessToken: token, expiresAt });
     return;
   }
@@ -874,7 +876,17 @@ function isAuthorized(req, url = null) {
 
 function isValidToken(token) {
   const session = token ? sessions.get(token) : null;
-  return Boolean(session && session.expiresAt > Date.now());
+  if (!session) return false;
+  const now = Date.now();
+  if (session.expiresAt <= now) {
+    sessions.delete(token);
+    return false;
+  }
+  if (now - Number(session.lastSeenAt || 0) > SESSION_TOUCH_INTERVAL_MS) {
+    session.lastSeenAt = now;
+    session.expiresAt = now + SESSION_TTL_MS;
+  }
+  return true;
 }
 
 function getSessionForToken(token) {

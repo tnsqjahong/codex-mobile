@@ -684,6 +684,7 @@ async function searchMentions(cwd: string, query: string, signal?: AbortSignal) 
   const headers: AnyRecord = { "content-type": "application/json" };
   if (state.token) headers.authorization = `Bearer ${state.token}`;
   const response = await fetch(`/api/mentions?${params.toString()}`, { headers, signal });
+  if (response.status === 401) forceUnauthenticated();
   if (!response.ok) throw new Error("Mention search failed");
   return response.json();
 }
@@ -2774,6 +2775,9 @@ async function fetchJson(url, options: AnyRecord = {}) {
     } catch {
       data = { error: text.slice(0, 300) };
     }
+  }
+  if (response.status === 401 && options.auth !== false) {
+    forceUnauthenticated();
   }
   if (!response.ok) throw new Error(data.error || "Request failed");
   return data;

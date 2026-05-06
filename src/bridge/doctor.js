@@ -7,6 +7,9 @@ import {
   tailscaleStatus,
   detectFunnelUrl,
   enableFunnel,
+  homebrewAvailable,
+  installTailscaleWithHomebrew,
+  openTailscaleApp,
 } from "./tailscale.js";
 
 const execFile = promisify(execFileCallback);
@@ -39,15 +42,17 @@ async function runTailscaleSection() {
   console.log("");
   console.log("Tailscale Funnel (optional, for stable PWA URL):");
   if (!(await tailscaleAvailable())) {
-    console.log("  SKIP Tailscale CLI not found.");
-    console.log("       Install it from https://tailscale.com/download to enable an");
-    console.log("       always-on HTTPS URL for the mobile companion.");
+    await offerTailscaleInstall();
     return;
   }
   const status = await tailscaleStatus();
   if (!status.running) {
     console.log(`  SKIP Tailscale not logged in (state: ${status.backendState || "unknown"}).`);
-    console.log("       Run `tailscale up` and finish browser login, then re-run setup.");
+    if (await openTailscaleApp()) {
+      console.log("       Opened Tailscale. Sign in there, then re-run `npm run setup`.");
+    } else {
+      console.log("       Open Tailscale or run `tailscale up`, finish login, then re-run setup.");
+    }
     return;
   }
   const existingUrl = await detectFunnelUrl(port);
@@ -62,14 +67,7 @@ async function runTailscaleSection() {
     console.log(`         sudo tailscale funnel --bg ${port}`);
     return;
   }
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  let answer = "";
-  try {
-    answer = (await rl.question(`       Enable now (sudo password required)? [y/N] `)).trim().toLowerCase();
-  } finally {
-    rl.close();
-  }
-  if (answer !== "y" && answer !== "yes") {
+  if (!(await askYesNo("       Enable now (sudo password required)? [y/N] "))) {
     console.log("       Skipped. To enable later:");
     console.log(`         sudo tailscale funnel --bg ${port}`);
     return;
@@ -87,6 +85,54 @@ async function runTailscaleSection() {
   } else {
     console.log("       Funnel command finished but URL could not be detected.");
     console.log("       Check `tailscale serve status --json` manually.");
+  }
+}
+
+async function offerTailscaleInstall() {
+  console.log("  SKIP Tailscale CLI not found.");
+  if (process.platform !== "darwin") {
+    console.log("       Install it from https://tailscale.com/download to enable an");
+    console.log("       always-on HTTPS URL for the mobile companion.");
+    return;
+  }
+  if (!(await homebrewAvailable())) {
+    console.log("       Homebrew was not found. Install Tailscale from:");
+    console.log("       https://tailscale.com/download/mac");
+    return;
+  }
+  if (!process.stdin.isTTY) {
+    console.log("       To install on macOS with Homebrew:");
+    console.log("         brew install --cask tailscale");
+    console.log("       Then open Tailscale, sign in, and re-run `npm run setup`.");
+    return;
+  }
+  if (!(await askYesNo("       Install Tailscale now with Homebrew? [y/N] "))) {
+    console.log("       Skipped. To install later:");
+    console.log("         brew install --cask tailscale");
+    return;
+  }
+  try {
+    await installTailscaleWithHomebrew();
+  } catch (error) {
+    console.log(`       Failed to install Tailscale: ${error.message}`);
+    console.log("       You can install it manually from https://tailscale.com/download/mac");
+    return;
+  }
+  console.log("  OK   Tailscale installed.");
+  if (await openTailscaleApp()) {
+    console.log("       Opened Tailscale. Sign in there, then re-run `npm run setup`.");
+  } else {
+    console.log("       Open Tailscale, sign in, then re-run `npm run setup`.");
+  }
+}
+
+async function askYesNo(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(question)).trim().toLowerCase();
+    return answer === "y" || answer === "yes";
+  } finally {
+    rl.close();
   }
 }
 

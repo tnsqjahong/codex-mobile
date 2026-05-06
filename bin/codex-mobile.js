@@ -6,7 +6,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
-import { detectFunnelUrl } from "../src/bridge/tailscale.js";
+import {
+  detectFunnelUrl,
+  enableFunnel,
+  tailscaleAvailable,
+  tailscaleStatus,
+} from "../src/bridge/tailscale.js";
 
 const execFile = promisify(execFileCallback);
 const entryFile = fileURLToPath(import.meta.url);
@@ -42,11 +47,8 @@ if (!bridgeWasRunning) {
 }
 
 if (!publicUrl && !localMode) {
-  const funnelUrl = await withTimeout(detectFunnelUrl(port), 1500).catch(() => null);
-  if (funnelUrl) {
-    console.log(`Using Tailscale Funnel: ${funnelUrl}`);
-    publicUrl = funnelUrl;
-  } else {
+  publicUrl = await resolveFunnelUrl({ allowEnable: process.stdin.isTTY });
+  if (!publicUrl) {
     tunnel = await startRemoteTunnel(targetUrl).catch((error) => {
       console.warn(`Remote tunnel failed: ${error.message}`);
       return null;
@@ -61,7 +63,7 @@ await setPublicUrl(publicUrl);
 
 console.log(`${bridgeWasRunning ? "Codex Mobile Companion already running" : "Codex Mobile Companion running"} on ${desktopUrl}`);
 console.log(`Mobile QR will point to: ${publicUrl}`);
-if (!tunnel && !localMode && !process.env.PUBLIC_URL) {
+if (!tunnel && !localMode && !process.env.PUBLIC_URL && publicUrl === localLanUrl) {
   console.log("Remote tunnel unavailable; QR is LAN-only until the tunnel can start.");
 }
 if (openBrowser) await openUrl(desktopUrl);
@@ -85,10 +87,17 @@ function startBridge() {
 }
 
 async function startBackgroundCompanion() {
+  if (!publicUrl && !localMode) {
+    publicUrl = await resolveFunnelUrl({ allowEnable: process.stdin.isTTY });
+  }
   const runningHealth = await getBridgeHealth();
   const runningUrl = runningHealth?.bridgeUrl || "";
   const hasStablePublicUrl = runningUrl && runningUrl !== targetUrl;
-  const runningUrlReady = publicUrl || localMode || hasStablePublicUrl;
+  const runningUrlReachable = hasStablePublicUrl ? await isPublicUrlReachable(runningUrl) : false;
+  const runningUrlReady = publicUrl || localMode || runningUrlReachable;
+  if (runningHealth?.ok && hasStablePublicUrl && !runningUrlReachable && !publicUrl && !localMode) {
+    console.log(`Ignoring unreachable mobile URL from the running bridge: ${runningUrl}`);
+  }
   if (runningHealth?.ok && runningUrlReady) {
     if (publicUrl) await setPublicUrl(publicUrl).catch(() => {});
     if (openBrowser) await openUrl(desktopUrl);
@@ -104,13 +113,49 @@ async function startBackgroundCompanion() {
     cwd: rootDir,
     detached: true,
     stdio: "ignore",
-    env: { ...process.env, CODEX_MOBILE_FOREGROUND: "1" },
+    env: {
+      ...process.env,
+      CODEX_MOBILE_FOREGROUND: "1",
+      ...(publicUrl ? { PUBLIC_URL: publicUrl } : {}),
+    },
   });
   child.unref();
   await waitForBridge(child);
   const mobileUrl = await waitForMobileUrl(child, runningUrl);
   if (openBrowser) await openUrl(desktopUrl);
   printReadyUrls("running in background", mobileUrl || desktopUrl);
+}
+
+async function resolveFunnelUrl({ allowEnable = false } = {}) {
+  if (process.env.CODEX_MOBILE_AUTO_FUNNEL === "0") return null;
+  const existingUrl = await withTimeout(detectFunnelUrl(port), 1500).catch(() => null);
+  if (existingUrl) {
+    console.log(`Using Tailscale Funnel: ${existingUrl}`);
+    return existingUrl;
+  }
+  if (!(await tailscaleAvailable().catch(() => false))) return null;
+  const status = await tailscaleStatus().catch(() => null);
+  if (!status?.running || !status.dnsName) return null;
+  if (!allowEnable) {
+    console.log(`Tailscale is running, but Funnel is not configured for port ${port}.`);
+    console.log(`Run \`npm run setup\` or \`sudo tailscale funnel --bg ${port}\` to use a stable mobile URL.`);
+    return null;
+  }
+  console.log(`Tailscale is running (${status.dnsName}), but Funnel is not configured for port ${port}.`);
+  console.log("Enabling Tailscale Funnel for a stable mobile URL...");
+  try {
+    await enableFunnel(port);
+  } catch (error) {
+    console.warn(`Tailscale Funnel setup failed: ${error.message}`);
+    return null;
+  }
+  const finalUrl = await withTimeout(detectFunnelUrl(port), 3000).catch(() => null);
+  if (finalUrl) {
+    console.log(`Using Tailscale Funnel: ${finalUrl}`);
+    return finalUrl;
+  }
+  console.warn("Tailscale Funnel command finished, but no Funnel URL was detected.");
+  return null;
 }
 
 async function startRemoteTunnel(target) {
@@ -175,6 +220,38 @@ async function setPublicUrl(url) {
   await postJson(`${desktopUrl}/api/desktop/public-url`, { publicUrl: url }, 1500).catch((error) => {
     throw new Error(`Failed to set QR URL: ${error.message}`);
   });
+}
+
+async function isPublicUrlReachable(url) {
+  if (!/^https?:\/\//i.test(url)) return false;
+  if (isTailscaleUrl(url)) {
+    const funnelUrl = await withTimeout(detectFunnelUrl(port), 1500).catch(() => null);
+    return normalizeUrl(funnelUrl) === normalizeUrl(url);
+  }
+  try {
+    const response = await fetch(new URL("/api/health", url), {
+      signal: AbortSignal.timeout(2500),
+      cache: "no-store",
+    });
+    if (!response.ok) return false;
+    const data = await response.json().catch(() => null);
+    return data?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+function isTailscaleUrl(url) {
+  try {
+    return new URL(url).hostname.endsWith(".ts.net");
+  } catch {
+    return false;
+  }
+}
+
+function normalizeUrl(url) {
+  if (!url) return null;
+  return String(url).replace(/\/$/, "");
 }
 
 function getLanAddress() {

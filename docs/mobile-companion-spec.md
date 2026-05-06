@@ -184,14 +184,14 @@ Responsibilities:
 - Subscribe to and forward server notifications.
 - Expose a small mobile-friendly HTTP/WebSocket API.
 - Manage QR pairing.
-- Manage mobile session tokens.
+- Manage mobile session tokens. Tokens are in-memory and tied to the running bridge process; they are refreshed while used so an overnight browser/PWA session does not expire simply because 12 hours passed.
 - Redact sensitive output before sending to mobile.
 - Keep Codex App Server bound to local process/stdio, not public network.
 
 Runtime:
 
 - Node.js 20+.
-- No direct new database for local-session mode; in-memory sessions are enough.
+- No direct new database for local-session mode; in-memory sessions are enough. A companion restart intentionally requires re-pairing.
 
 Current implementation note:
 
