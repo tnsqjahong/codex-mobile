@@ -1,9 +1,14 @@
 export type ChangeFile = {
   path: string
   status: string
+  repo?: string
+  repoPath?: string
+  displayPath?: string
   additions?: number
   deletions?: number
   diff?: string
+  truncatedDiff?: boolean
+  diffUnavailableReason?: string
   [key: string]: any
 }
 
@@ -11,6 +16,11 @@ export type ChangesView = {
   summary: { filesChanged: number; additions: number; deletions: number }
   turnDiff: { diff: string; updatedAt?: number } | null
   files: ChangeFile[]
+  repositories: any[]
+  canCommit: boolean
+  workspace: boolean
+  truncatedFiles: number
+  truncatedRepositories: number
   loading: boolean
   error: string
 }
@@ -32,6 +42,7 @@ export function useChangesFiles(state: Record<string, any>): ChangesView {
     files.push({
       ...file,
       path,
+      displayPath: file.displayPath || path,
       status: file.status || file.changeType || "M",
     })
   }
@@ -40,7 +51,12 @@ export function useChangesFiles(state: Record<string, any>): ChangesView {
     summary,
     turnDiff,
     files,
+    repositories: changes?.repositories || [],
+    canCommit: changes?.canCommit !== false && !changes?.workspace,
+    workspace: Boolean(changes?.workspace),
+    truncatedFiles: changes?.truncatedFiles ?? 0,
+    truncatedRepositories: changes?.truncatedRepositories ?? 0,
     loading: Boolean(state.changesLoading),
-    error: state.changesError || "",
+    error: state.changesError || changes?.error || "",
   }
 }

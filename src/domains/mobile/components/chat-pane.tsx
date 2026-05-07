@@ -380,28 +380,75 @@ export function ChatPane({ state }: { state: Record<string, any> }) {
 }
 
 export function ChangesPane({ state }: { state: Record<string, any> }) {
-  const { summary, turnDiff, files, loading, error } = useChangesFiles(state)
+  const {
+    summary,
+    turnDiff,
+    files,
+    repositories,
+    canCommit,
+    workspace,
+    truncatedFiles,
+    truncatedRepositories,
+    loading,
+    error,
+  } = useChangesFiles(state)
+  const groupedFiles = useMemo(() => {
+    const groups = new Map<string, typeof files>()
+    for (const file of files) {
+      const key = file.repoPath || file.repo || "."
+      const list = groups.get(key) || []
+      list.push(file)
+      groups.set(key, list)
+    }
+    return [...groups.entries()]
+  }, [files])
 
   return (
     <ScrollArea className="h-full overflow-x-hidden px-3 pb-3 pt-3">
       <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-3 pb-2">
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--hairline-soft)] bg-transparent px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--hairline-soft)] bg-[var(--surface)]/30 px-4 py-3">
           <div>
             <div className="text-[14px] font-semibold text-[var(--ink-strong)]">{summary.filesChanged} files changed</div>
-            <p className="mt-0.5 text-[12.5px] text-[var(--muted-text)]">+{summary.additions} / -{summary.deletions}</p>
+            <p className="mt-0.5 text-[12.5px] text-[var(--muted-text)]">
+              <span className="text-emerald-300">+{summary.additions}</span>
+              <span className="mx-1.5 text-[var(--muted-text)]">/</span>
+              <span className="text-rose-300">-{summary.deletions}</span>
+              {workspace ? <span className="ml-2">workspace scan</span> : null}
+            </p>
           </div>
           <div className="flex gap-1.5">
             <Button variant="ghost" size="sm" className="h-8 gap-1 rounded-md px-2.5 text-[12.5px] text-[var(--ink)] hover:bg-[var(--row-hover)]" onClick={() => state.thread?.id && void mobileController.loadChanges(state.thread.id)}>
               <RefreshCw className="size-3.5" /> Refresh
             </Button>
-            <Button size="sm" className="h-8 gap-1 rounded-md px-2.5 text-[12.5px]" onClick={() => void mobileController.commitChanges()} disabled={!summary.filesChanged}>
+            <Button
+              size="sm"
+              className="h-8 gap-1 rounded-md px-2.5 text-[12.5px]"
+              onClick={() => void mobileController.commitChanges()}
+              disabled={!summary.filesChanged || !canCommit}
+              title={canCommit ? "Commit current repository changes" : "Commit is available only inside a single git repository"}
+            >
               <CheckCircle2 className="size-3.5" /> Commit
             </Button>
           </div>
         </div>
 
-        {loading ? <div className="text-[12.5px] text-[var(--muted-text)]">변경 사항을 새로고침 중입니다…</div> : null}
+        {loading ? <div className="text-[12.5px] text-[var(--muted-text)]">변경 사항을 새로고침 중입니다...</div> : null}
         {error ? <div className="text-[12.5px] text-[var(--status-error)]">{error}</div> : null}
+        {workspace ? (
+          <div className="rounded-lg border border-[var(--hairline-soft)] bg-[var(--canvas-soft)] px-3 py-2 text-[12px] text-[var(--muted-text)]">
+            현재 폴더가 git repo가 아니어서 하위 repo의 변경사항을 모아 보여줍니다.
+            {truncatedRepositories ? <span className="ml-1">Repo {truncatedRepositories}개는 제한 때문에 생략됐습니다.</span> : null}
+          </div>
+        ) : null}
+        {repositories.length ? (
+          <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+            {repositories.map((repo: any) => (
+              <span key={repo.root} className="shrink-0 rounded-full border border-[var(--hairline-soft)] bg-[var(--surface)] px-2.5 py-1 text-[11.5px] text-[var(--ink)]">
+                {repo.repoPath || repo.repo} · {repo.summary?.filesChanged || 0}
+              </span>
+            ))}
+          </div>
+        ) : null}
 
         {turnDiff ? (
           <div className="rounded-lg border border-[var(--hairline-soft)] bg-transparent p-3">
@@ -410,27 +457,83 @@ export function ChangesPane({ state }: { state: Record<string, any> }) {
               <span className="text-[13px] font-medium text-[var(--ink-strong)]">Latest turn diff</span>
               <span className="text-[11.5px] text-[var(--muted-text)]">{mobileSelectors.formatClock(turnDiff.updatedAt)}</span>
             </div>
-            <pre className="max-h-[50svh] overflow-auto rounded-md border border-[var(--hairline-soft)] bg-[var(--code-block-bg)] p-2.5 font-mono text-[11.5px] leading-relaxed text-[var(--ink)]">{turnDiff.diff}</pre>
+            <DiffBlock diff={turnDiff.diff} maxHeightClass="max-h-[50svh]" />
           </div>
         ) : null}
 
-        {files.map((file: any) => (
-          <div key={file.path} className="rounded-lg border border-[var(--hairline-soft)] bg-transparent p-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="truncate text-[13px] font-medium text-[var(--ink-strong)]">{file.path}</div>
-                <div className="mt-0.5 text-[11.5px] text-[var(--muted-text)]">{file.status} · +{file.additions || 0} / -{file.deletions || 0}</div>
+        {groupedFiles.length ? groupedFiles.map(([group, groupFiles]) => (
+          <div key={group} className="flex flex-col gap-2">
+            {workspace ? (
+              <div className="sticky top-0 z-10 rounded-md border border-[var(--hairline-soft)] bg-[var(--canvas)]/95 px-2.5 py-1.5 text-[12px] font-medium text-[var(--ink-strong)] backdrop-blur">
+                {group}
               </div>
-              <span className="rounded-full border border-[var(--hairline)] bg-[var(--canvas-soft)] px-2 py-0.5 text-[11px] font-medium uppercase text-[var(--muted-text)]">{file.status}</span>
-            </div>
-            {file.diff ? (
-              <pre className="mt-2 max-h-[38svh] overflow-auto rounded-md border border-[var(--hairline-soft)] bg-[var(--code-block-bg)] p-2.5 font-mono text-[11.5px] leading-relaxed text-[var(--ink)]">{file.diff}</pre>
-            ) : (
-              <p className="mt-2 text-[12.5px] text-[var(--muted-text)]">Unified diff unavailable.</p>
-            )}
+            ) : null}
+            {groupFiles.map((file: any) => (
+              <details key={`${file.repoPath || ""}:${file.path}`} className="group rounded-lg border border-[var(--hairline-soft)] bg-transparent p-0" open>
+                <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-3 py-2.5">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <span className={cn("mt-0.5 rounded px-1.5 py-0.5 font-mono text-[10.5px] font-semibold", statusBadgeClass(file.status))}>{file.status}</span>
+                    <div className="min-w-0">
+                      <div className="truncate font-mono text-[12.5px] font-medium text-[var(--ink-strong)]">{file.displayPath || file.path}</div>
+                      <div className="mt-0.5 text-[11.5px] text-[var(--muted-text)]">
+                        <span className="text-emerald-300">+{file.additions ?? 0}</span>
+                        <span className="mx-1.5">/</span>
+                        <span className="text-rose-300">-{file.deletions ?? 0}</span>
+                        {file.truncatedDiff ? <span className="ml-2">diff truncated</span> : null}
+                      </div>
+                    </div>
+                  </div>
+                  <ChevronDown className="mt-1 size-3.5 shrink-0 text-[var(--muted-text)] transition-transform group-open:rotate-180" />
+                </summary>
+                {file.diff ? (
+                  <div className="border-t border-[var(--hairline-soft)]">
+                    <DiffBlock diff={file.diff} maxHeightClass="max-h-[46svh]" />
+                  </div>
+                ) : (
+                  <p className="border-t border-[var(--hairline-soft)] px-3 py-2 text-[12.5px] text-[var(--muted-text)]">
+                    {file.diffUnavailableReason || "Unified diff unavailable."}
+                  </p>
+                )}
+              </details>
+            ))}
           </div>
-        ))}
+        )) : (
+          <p className="rounded-lg border border-[var(--hairline-soft)] px-3 py-5 text-center text-[12.5px] text-[var(--muted-text)]">No working tree changes.</p>
+        )}
+        {truncatedFiles ? (
+          <p className="text-[12px] text-[var(--muted-text)]">파일 {truncatedFiles}개는 표시 제한 때문에 생략됐습니다.</p>
+        ) : null}
       </div>
     </ScrollArea>
+  )
+}
+
+function statusBadgeClass(status: string) {
+  if (status.includes("?")) return "bg-sky-500/15 text-sky-200"
+  if (status.includes("A")) return "bg-emerald-500/15 text-emerald-200"
+  if (status.includes("D")) return "bg-rose-500/15 text-rose-200"
+  if (status.includes("R")) return "bg-violet-500/15 text-violet-200"
+  return "bg-amber-500/15 text-amber-100"
+}
+
+function diffLineClass(line: string) {
+  if (line.startsWith("diff --git")) return "text-amber-200"
+  if (line.startsWith("@@")) return "bg-sky-500/10 text-sky-200"
+  if (line.startsWith("+++") || line.startsWith("---")) return "text-sky-200"
+  if (line.startsWith("+")) return "bg-emerald-500/10 text-emerald-100"
+  if (line.startsWith("-")) return "bg-rose-500/10 text-rose-100"
+  return "text-[var(--ink)]"
+}
+
+function DiffBlock({ diff, maxHeightClass }: { diff: string; maxHeightClass: string }) {
+  const lines = useMemo(() => String(diff || "").split("\n"), [diff])
+  return (
+    <pre className={cn("overflow-auto rounded-md bg-[var(--code-block-bg)] py-2 font-mono text-[11.5px] leading-relaxed", maxHeightClass)}>
+      {lines.map((line, index) => (
+        <span key={index} className={cn("block min-w-max px-2.5", diffLineClass(line))}>
+          {line || " "}
+        </span>
+      ))}
+    </pre>
   )
 }
