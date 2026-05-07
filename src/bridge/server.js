@@ -45,6 +45,22 @@ const UPLOAD_ROOT = path.join(os.tmpdir(), "codex-mobile-uploads");
 const PREVIEW_TTL_MS = 12 * 60 * 60 * 1000;
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_TOUCH_INTERVAL_MS = 10 * 60 * 1000;
+const MAX_CHANGE_FILES = 160;
+const MAX_CHANGE_DIFF_BYTES = 120_000;
+const MAX_WORKSPACE_GIT_REPOS = 40;
+const WORKSPACE_GIT_SCAN_DEPTH = 3;
+const GIT_SCAN_SKIP_DIRS = new Set([
+  ".git",
+  ".next",
+  ".turbo",
+  ".vercel",
+  ".vite",
+  ".omx",
+  ".playwright-cli",
+  "coverage",
+  "dist",
+  "node_modules",
+]);
 let publicBaseUrlOverride = process.env.PUBLIC_URL?.replace(/\/$/, "") || null;
 let loginProcess = null;
 let loginFlow = {
@@ -196,7 +212,11 @@ async function handleApi(req, res, url) {
       console.warn(`Failed to prewarm Codex projects: ${error.message || error}`);
     });
     const code = crypto.randomBytes(4).toString("hex").toUpperCase();
-    const expiresAt = Date.now() + 300_000; // 5분 TTL — 모바일 수동 입력에 여유
+    // Pairing codes live for the lifetime of this server process. The
+    // in-memory `pairings` Map is wiped on restart, so a code's validity
+    // is effectively bounded by uptime. Time-based expiry was removed at
+    // the user's request (avoid having to refresh every few minutes).
+    const expiresAt = Number.MAX_SAFE_INTEGER;
     const qrUrl = `${getPublicBaseUrl()}/?pair=${code}`;
     pairings.set(code, { expiresAt, qrUrl });
     sendJson(res, 200, {
@@ -242,7 +262,11 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/local-file") {
-    await sendLocalImage(res, url.searchParams.get("id"));
+    await sendLocalImage(res, {
+      previewId: url.searchParams.get("id"),
+      filePath: url.searchParams.get("path"),
+      cwd: url.searchParams.get("cwd"),
+    });
     return;
   }
 
@@ -987,29 +1011,56 @@ async function saveUploads(files) {
   return saved;
 }
 
-async function sendLocalImage(res, previewId) {
-  const preview = localPreviewFiles.get(String(previewId || ""));
-  if (!preview || preview.expiresAt < Date.now()) {
-    if (preview) localPreviewFiles.delete(String(previewId || ""));
-    sendJson(res, 404, { error: "Image preview not found" });
+async function sendLocalImage(res, { previewId, filePath, cwd }) {
+  const resolved = previewId
+    ? resolveUploadPreviewPath(previewId)
+    : resolveProjectImagePath(filePath, cwd);
+  if (!resolved.ok) {
+    sendJson(res, resolved.status, { error: resolved.error });
     return;
   }
-  const resolved = path.resolve(preview.path);
-  if (!isImageFile(resolved)) {
+
+  if (!isImageFile(resolved.path)) {
     sendJson(res, 415, { error: "Only local image previews are supported" });
     return;
   }
-  const stat = await fs.stat(resolved);
+  const stat = await fs.stat(resolved.path).catch(() => null);
+  if (!stat) {
+    sendJson(res, 404, { error: "Image preview not found" });
+    return;
+  }
   if (!stat.isFile() || stat.size > MAX_UPLOAD_BYTES) {
     sendJson(res, 413, { error: "Image preview is too large" });
     return;
   }
-  const data = await fs.readFile(resolved);
+  const data = await fs.readFile(resolved.path);
   res.writeHead(200, {
-    "content-type": contentType(resolved),
+    "content-type": contentType(resolved.path),
     "cache-control": "private, max-age=300",
   });
   res.end(data);
+}
+
+function resolveUploadPreviewPath(previewId) {
+  const preview = localPreviewFiles.get(String(previewId || ""));
+  if (!preview || preview.expiresAt < Date.now()) {
+    if (preview) localPreviewFiles.delete(String(previewId || ""));
+    return { ok: false, status: 404, error: "Image preview not found" };
+  }
+  return { ok: true, path: path.resolve(preview.path) };
+}
+
+function resolveProjectImagePath(filePath, cwd) {
+  if (!filePath || !cwd) return { ok: false, status: 400, error: "Missing image path" };
+  const root = path.resolve(String(cwd));
+  const candidate = String(filePath);
+  const resolved = path.isAbsolute(candidate)
+    ? path.resolve(candidate)
+    : path.resolve(root, candidate);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+    return { ok: false, status: 403, error: "Image path is outside the current project" };
+  }
+  return { ok: true, path: resolved };
 }
 
 function decodeUploadData(data) {
@@ -1172,11 +1223,11 @@ function normalizeAttachment(attachment) {
 }
 
 function isImageAttachment(mime, name) {
-  return String(mime || "").startsWith("image/") || /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(String(name || ""));
+  return String(mime || "").startsWith("image/") || /\.(png|jpe?g|gif|webp|heic|heif|svg)$/i.test(String(name || ""));
 }
 
 function isImageFile(filePath) {
-  return /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(String(filePath || ""));
+  return /\.(png|jpe?g|gif|webp|heic|heif|svg)$/i.test(String(filePath || ""));
 }
 
 function sendJson(res, status, value) {
@@ -1596,30 +1647,140 @@ async function validateBranchName(cwd, branch, create) {
 async function getGitChanges(cwd) {
   const context = await getGitContext(cwd);
   if (!context.ok) {
-    return { ...context, summary: { filesChanged: 0, additions: 0, deletions: 0 }, files: [] };
+    const workspace = await getWorkspaceGitChanges(cwd, context).catch(() => null);
+    if (workspace) return workspace;
+    return { ...context, canCommit: false, summary: { filesChanged: 0, additions: 0, deletions: 0 }, files: [] };
   }
+  return getSingleRepoGitChanges(cwd, context);
+}
 
+async function getSingleRepoGitChanges(cwd, context, options = {}) {
   const [statusText, diffStat, cachedStat] = await Promise.all([
     git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"]),
     git(cwd, ["diff", "--numstat"]).catch(() => ""),
     git(cwd, ["diff", "--cached", "--numstat"]).catch(() => ""),
   ]);
   const files = mergeGitStats(parseGitStatus(statusText), parseNumstat(`${diffStat}\n${cachedStat}`));
-  const enrichedFiles = await Promise.all(files.slice(0, 80).map((file) => addFileDiff(cwd, file)));
-  const summary = enrichedFiles.reduce((acc, file) => {
+  const enrichedFiles = await Promise.all(files.slice(0, MAX_CHANGE_FILES).map((file) => addFileDiff(cwd, file)));
+  const summary = files.reduce((acc, file) => {
     acc.filesChanged += 1;
     acc.additions += Number(file.additions || 0);
     acc.deletions += Number(file.deletions || 0);
     return acc;
   }, { filesChanged: 0, additions: 0, deletions: 0 });
 
-  return { ...context, summary, files: enrichedFiles };
+  return {
+    ...context,
+    canCommit: true,
+    summary,
+    files: enrichedFiles.map((file) => ({
+      ...file,
+      repo: options.repoName || path.basename(context.root || cwd),
+      repoRoot: context.root || cwd,
+      repoPath: options.repoPath || ".",
+    })),
+    truncatedFiles: files.length > enrichedFiles.length ? files.length - enrichedFiles.length : 0,
+  };
+}
+
+async function getWorkspaceGitChanges(cwd, baseContext) {
+  const repos = await findNestedGitRepositories(cwd);
+  if (!repos.length) return null;
+
+  const repositoryResults = [];
+  for (const repoRoot of repos.slice(0, MAX_WORKSPACE_GIT_REPOS)) {
+    const context = await getGitContext(repoRoot).catch(() => null);
+    if (!context?.ok) continue;
+    const repoPath = path.relative(cwd, repoRoot) || ".";
+    const repoChanges = await getSingleRepoGitChanges(repoRoot, context, {
+      repoName: path.basename(repoRoot),
+      repoPath,
+    }).catch(() => null);
+    if (!repoChanges || !repoChanges.summary.filesChanged) continue;
+    repositoryResults.push(repoChanges);
+  }
+
+  const summary = repositoryResults.reduce((acc, repo) => {
+    acc.filesChanged += repo.summary.filesChanged || 0;
+    acc.additions += repo.summary.additions || 0;
+    acc.deletions += repo.summary.deletions || 0;
+    return acc;
+  }, { filesChanged: 0, additions: 0, deletions: 0 });
+
+  const files = repositoryResults.flatMap((repo) => repo.files.map((file) => ({
+    ...file,
+    displayPath: file.repoPath && file.repoPath !== "." ? `${file.repoPath}/${file.path}` : file.path,
+  })));
+
+  return {
+    ok: true,
+    workspace: true,
+    canCommit: false,
+    cwd,
+    root: cwd,
+    branch: repositoryResults.length ? `${repositoryResults.length} dirty repos` : "workspace",
+    sha: null,
+    dirty: Boolean(summary.filesChanged),
+    statusCount: summary.filesChanged,
+    summary,
+    files,
+    repositories: repositoryResults.map((repo) => ({
+      root: repo.root,
+      repo: path.basename(repo.root),
+      repoPath: path.relative(cwd, repo.root) || ".",
+      branch: repo.branch,
+      sha: repo.sha,
+      summary: repo.summary,
+      truncatedFiles: repo.truncatedFiles || 0,
+    })),
+    truncatedRepositories: repos.length > MAX_WORKSPACE_GIT_REPOS ? repos.length - MAX_WORKSPACE_GIT_REPOS : 0,
+    sourceError: baseContext.error || null,
+  };
+}
+
+async function findNestedGitRepositories(cwd) {
+  const root = path.resolve(String(cwd || ""));
+  if (!root) return [];
+  const repos = [];
+
+  async function walk(dir, depth) {
+    if (repos.length >= MAX_WORKSPACE_GIT_REPOS) return;
+    let entries = [];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    if (entries.some((entry) => entry.name === ".git")) {
+      repos.push(dir);
+      return;
+    }
+    if (depth >= WORKSPACE_GIT_SCAN_DEPTH) return;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (GIT_SCAN_SKIP_DIRS.has(entry.name)) continue;
+      if (entry.name.startsWith(".") && entry.name !== ".config") continue;
+      await walk(path.join(dir, entry.name), depth + 1);
+      if (repos.length >= MAX_WORKSPACE_GIT_REPOS) return;
+    }
+  }
+
+  await walk(root, 0);
+  return repos.sort((a, b) => a.localeCompare(b));
 }
 
 async function addFileDiff(cwd, file) {
   if (file.status.includes("?")) {
     const additions = await countTextLines(path.join(cwd, file.path)).catch(() => null);
-    return { ...file, additions, deletions: 0, diff: "" };
+    const diff = await buildUntrackedFileDiff(cwd, file.path).catch(() => "");
+    return {
+      ...file,
+      additions,
+      deletions: 0,
+      diff,
+      binary: additions == null && !diff,
+      diffUnavailableReason: diff ? "" : "untracked file is binary, too large, or unreadable",
+    };
   }
   const args = ["diff", "--", file.path];
   const cachedArgs = ["diff", "--cached", "--", file.path];
@@ -1630,8 +1791,32 @@ async function addFileDiff(cwd, file) {
   const diff = `${staged ? `${staged}\n` : ""}${unstaged}`.trim();
   return {
     ...file,
-    diff: diff.length > 80_000 ? `${diff.slice(0, 80_000)}\n\n... diff truncated ...` : diff,
+    diff: diff.length > MAX_CHANGE_DIFF_BYTES ? `${diff.slice(0, MAX_CHANGE_DIFF_BYTES)}\n\n... diff truncated ...` : diff,
+    truncatedDiff: diff.length > MAX_CHANGE_DIFF_BYTES,
   };
+}
+
+async function buildUntrackedFileDiff(cwd, filePath) {
+  const absolute = path.join(cwd, filePath);
+  const stat = await fs.stat(absolute);
+  if (!stat.isFile() || stat.size > MAX_CHANGE_DIFF_BYTES) return "";
+  const content = await fs.readFile(absolute, "utf8");
+  if (content.includes("\u0000")) return "";
+  const normalized = content.endsWith("\n") ? content : `${content}\n`;
+  const lines = normalized.split("\n");
+  const body = lines
+    .slice(0, -1)
+    .map((line) => `+${line}`)
+    .join("\n");
+  return [
+    `diff --git a/${filePath} b/${filePath}`,
+    "new file mode 100644",
+    "index 0000000..0000000",
+    "--- /dev/null",
+    `+++ b/${filePath}`,
+    `@@ -0,0 +1,${lines.length - 1} @@`,
+    body,
+  ].join("\n");
 }
 
 function parseGitStatus(statusText) {

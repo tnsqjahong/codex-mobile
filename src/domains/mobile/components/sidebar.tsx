@@ -49,11 +49,10 @@ function SidebarBody({ state }: { state: Record<string, any> }) {
 
   return (
     <div
-      className="flex h-full flex-col bg-[var(--sidebar-bg)] text-[var(--ink)]"
+      className="codex-sidebar-enter flex h-full flex-col bg-[var(--sidebar-bg)] text-[var(--ink)]"
       style={{
         paddingTop: "env(safe-area-inset-top)",
-        paddingBottom:
-          "env(safe-area-max-inset-bottom, env(safe-area-inset-bottom, 0px))",
+        paddingBottom: "var(--app-effective-safe-bottom)",
       }}
     >
       {/* Brand header */}
@@ -197,7 +196,7 @@ export function Sidebar({ state, desktopCollapsed = false }: { state: Record<str
     <>
       <div
         className={cn(
-          "border-r border-[var(--hairline-soft)] bg-[var(--sidebar-bg)] lg:h-full lg:w-[320px] lg:flex-col",
+          "border-r border-[var(--hairline-soft)] bg-[var(--sidebar-bg)] transition-[width,opacity] duration-200 ease-out lg:h-full lg:w-[320px] lg:flex-col",
           desktopCollapsed ? "hidden" : "hidden lg:flex",
         )}
       >

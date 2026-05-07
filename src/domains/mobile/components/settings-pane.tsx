@@ -54,6 +54,30 @@ function StaticRow({
   )
 }
 
+function UsageRow({
+  usageWindow,
+}: {
+  usageWindow: {
+    label: string
+    usedPercent: number | null
+    remainingPercent: number | null
+    resetsAt: string | null
+  }
+}) {
+  const parts = [
+    usageWindow.usedPercent !== null ? `사용 ${usageWindow.usedPercent}%` : null,
+    usageWindow.resetsAt ? `다음 업데이트 ${usageWindow.resetsAt}` : null,
+  ].filter(Boolean)
+
+  return (
+    <StaticRow
+      label={`${usageWindow.label} 사용량`}
+      description={parts.length ? parts.join(" · ") : undefined}
+      value={usageWindow.remainingPercent !== null ? `${usageWindow.remainingPercent}% 남음` : undefined}
+    />
+  )
+}
+
 function ActionRow({
   label,
   description,
@@ -173,18 +197,31 @@ export function SettingsPane({ state }: { state: Record<string, any> }) {
             </div>
           </div>
 
-          {view.usage.percent !== null || view.usage.resetsAt ? (
-            <Section title="Usage">
-              {view.usage.percent !== null ? (
-                <StaticRow label="이번 주기 사용량" value={`${view.usage.percent}%`} />
-              ) : null}
-              {view.usage.resetsAt ? <StaticRow label="다음 초기화" value={view.usage.resetsAt} /> : null}
-            </Section>
-          ) : null}
+          <Section title="Usage">
+            {view.usage.windows.length ? (
+              view.usage.windows.map((usageWindow) => (
+                <div key={usageWindow.id}>
+                  <UsageRow usageWindow={usageWindow} />
+                </div>
+              ))
+            ) : (
+              <StaticRow
+                label="사용량 정보"
+                description={view.usage.error || "Codex App Server에서 사용량 정보를 아직 받지 못했습니다."}
+              />
+            )}
+            {view.usage.nextResetLabel ? (
+              <StaticRow
+                label="다음 업데이트"
+                description="가장 먼저 초기화되는 사용량 창 기준"
+                value={view.usage.nextResetLabel}
+              />
+            ) : null}
+          </Section>
 
           <Section title="Runtime">
-            <StaticRow label="Model" value={view.runtime.model} />
-            <StaticRow label="Reasoning" value={view.runtime.effort} />
+            <StaticRow label="Model" description={view.runtime.modelDescription || undefined} value={view.runtime.model} />
+            <StaticRow label="Reasoning" description={view.runtime.effortDescription || undefined} value={view.runtime.effort} />
             <StaticRow label="Approval" value={view.runtime.approval} />
             <StaticRow label="Sandbox" value={view.runtime.sandbox} />
           </Section>
