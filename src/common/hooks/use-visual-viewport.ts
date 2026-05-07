@@ -11,8 +11,12 @@ function syncVisualViewport() {
   largestViewportHeight = Math.max(largestViewportHeight, window.innerHeight, height + offsetTop)
   const bottomInset = Math.max(0, largestViewportHeight - height - offsetTop)
   const keyboardOpen = bottomInset > KEYBOARD_INSET_THRESHOLD
+  const visualSafeBottom = keyboardOpen ? 0 : bottomInset
+  const viewportBottom = keyboardOpen ? height + offsetTop : height
 
   root.dataset.keyboardOpen = keyboardOpen ? "true" : "false"
+  root.style.setProperty("--app-visual-safe-bottom", `${Math.ceil(visualSafeBottom)}px`)
+  root.style.setProperty("--app-visual-viewport-height", `${Math.ceil(viewportBottom)}px`)
 }
 
 export function useVisualViewport() {

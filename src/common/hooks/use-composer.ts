@@ -43,8 +43,9 @@ export type ComposerView = {
 }
 
 function deriveEfforts(state: Record<string, any>): readonly string[] {
+  const selectedModel = state.selectedModel || state.modelConfig?.model || ""
   const model = (state.models || []).find(
-    (item: any) => item.model === state.selectedModel || item.id === state.selectedModel,
+    (item: any) => item.model === selectedModel || item.id === selectedModel,
   )
   const list: string[] = (model?.supportedReasoningEfforts || []).map(
     (item: any) => item.reasoningEffort,
@@ -84,6 +85,25 @@ function hasDraftValue(state: Record<string, any>): boolean {
   return Boolean(
     String(state.draftText || "").trim() || (state.attachments || []).length,
   )
+}
+
+function modelValue(model: any): string {
+  return model?.model || model?.id || ""
+}
+
+function findModel(state: Record<string, any>, value: string) {
+  return (state.models || []).find((item: any) => modelValue(item) === value)
+}
+
+function displayModelLabel(state: Record<string, any>, value: string): string {
+  const model = findModel(state, value)
+  return model?.displayName || value || "default"
+}
+
+function supportedEffortsForModel(model: any): string[] {
+  return (model?.supportedReasoningEfforts || [])
+    .map((item: any) => item.reasoningEffort)
+    .filter(Boolean)
 }
 
 async function submitComposer(state: Record<string, any>, stopInsteadOfSend: boolean): Promise<void> {
@@ -127,8 +147,8 @@ export function useComposer(state: Record<string, any>): ComposerView {
   const stopInsteadOfSend = mobileSelectors.isThreadBusy() && !hasDraft
   const permissionOptions = mobileSelectors.permissionOptions() as PermissionOption[]
   const permissionLabel = derivePermissionLabel(state.selectedPermission)
-  const modelLabel =
-    state.selectedModel || state.modelConfig?.model || "default"
+  const activeModel = state.selectedModel || state.modelConfig?.model || ""
+  const modelLabel = displayModelLabel(state, activeModel)
 
   return {
     fileInputRef,
@@ -145,7 +165,7 @@ export function useComposer(state: Record<string, any>): ComposerView {
     modelLabel,
     selectedPermission: state.selectedPermission || "",
     selectedEffort: state.selectedEffort || "",
-    selectedModel: state.selectedModel || state.modelConfig?.model || "",
+    selectedModel: activeModel,
     thread: state.thread ?? null,
     selectedProject: state.selectedProject ?? null,
     branches: state.branches ?? null,
@@ -180,8 +200,16 @@ export function useComposer(state: Record<string, any>): ComposerView {
       localStorage.setItem("codexMobileEffort", value)
     },
     onSelectModel(value) {
-      patchState({ selectedModel: value })
+      const model = findModel(state, value)
+      const supportedEfforts = supportedEffortsForModel(model)
+      const nextEffort =
+        supportedEfforts.length && !supportedEfforts.includes(state.selectedEffort)
+          ? model?.defaultReasoningEffort || supportedEfforts[0] || ""
+          : state.selectedEffort
+      patchState({ selectedModel: value, selectedEffort: nextEffort || "" })
       localStorage.setItem("codexMobileModel", value)
+      if (nextEffort) localStorage.setItem("codexMobileEffort", nextEffort)
+      else localStorage.removeItem("codexMobileEffort")
     },
     onCheckoutBranch(value) {
       if (value === "__create__") {

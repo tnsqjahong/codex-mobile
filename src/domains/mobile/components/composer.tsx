@@ -41,7 +41,7 @@ export function Composer({ state }: { state: Record<string, any> }) {
 
   return (
     <div
-      className="w-full max-w-full px-3 pt-1"
+      className="codex-composer-enter w-full max-w-full px-3 pt-1"
       style={{
         paddingBottom: "var(--composer-bottom-padding, max(env(safe-area-inset-bottom, 0px), 0.5rem))",
       }}

@@ -63,7 +63,7 @@ function renderAttachments(attachments: any[]) {
       {attachments.map((attachment, index) => {
         const name = attachment.name || mobileSelectors.pathBasename(attachment.path || attachment.url || "Attachment")
         const image = attachment.isImage || mobileSelectors.isImagePath(name) || mobileSelectors.isImagePath(attachment.path || attachment.url || "")
-        const src = attachment.previewUrl || attachment.url || mobileSelectors.localPreviewUrl(attachment)
+        const src = mobileSelectors.localPreviewUrl(attachment)
         if (image && src) {
           return (
             <figure key={`${name}-${index}`} className="overflow-hidden rounded-lg border border-[var(--hairline-soft)] bg-[var(--surface)]">

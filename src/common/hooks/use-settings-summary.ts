@@ -2,8 +2,25 @@ import { useMemo } from "react"
 
 export interface SettingsSummaryView {
   account: { primaryLabel: string; planLabel: string | null; loggedIn: boolean }
-  usage: { percent: number | null; resetsAt: string | null }
-  runtime: { model: string; effort: string; approval: string; sandbox: string }
+  usage: {
+    windows: Array<{
+      id: string
+      label: string
+      usedPercent: number | null
+      remainingPercent: number | null
+      resetsAt: string | null
+    }>
+    nextResetLabel: string | null
+    error: string | null
+  }
+  runtime: {
+    model: string
+    effort: string
+    approval: string
+    sandbox: string
+    modelDescription: string | null
+    effortDescription: string | null
+  }
   plugins: string[]
   skills: string[]
   apps: string[]
@@ -38,20 +55,95 @@ function pickAccountSummary(settings: Record<string, any>): SettingsSummaryView[
 }
 
 function pickUsageSummary(settings: Record<string, any>): SettingsSummaryView["usage"] {
-  const primary = settings.rateLimits?.rateLimits?.primary
-  if (!primary) return { percent: null, resetsAt: null }
-  const percent = Number.isFinite(primary.usedPercent) ? Math.round(primary.usedPercent) : null
-  const resetsAt = primary.resetsAt ? RESETS_FORMATTER.format(new Date(primary.resetsAt)) : null
-  return { percent, resetsAt }
+  const root = settings.rateLimits?.rateLimits
+  const windows = [
+    normalizeUsageWindow("primary", "5h 세션", root?.primary),
+    normalizeUsageWindow("secondary", "주간", root?.secondary),
+  ].filter((entry) => entry.usedPercent !== null || entry.resetsAt)
+  const nextResetMs = windows
+    .map((entry) => entry.resetsAtMs)
+    .filter((value): value is number => value !== null)
+    .sort((a, b) => a - b)[0]
+
+  return {
+    windows: windows.map(({ resetsAtMs, ...entry }) => entry),
+    nextResetLabel: nextResetMs ? RESETS_FORMATTER.format(new Date(nextResetMs)) : null,
+    error: settings.rateLimits?.error || null,
+  }
 }
 
-function pickRuntimeSummary(settings: Record<string, any>): SettingsSummaryView["runtime"] {
-  const summary = settings.config?.summary || {}
+function normalizeUsageWindow(id: string, fallbackLabel: string, source: any) {
+  const usedPercent = normalizePercent(source?.usedPercent)
+  const resetMs = normalizeTimestampMs(source?.resetsAt)
   return {
-    model: summary.model || "default",
-    effort: summary.effort || "default",
+    id,
+    label: labelForWindow(source?.windowDurationMins) || fallbackLabel,
+    usedPercent,
+    remainingPercent: usedPercent === null ? null : Math.max(0, 100 - usedPercent),
+    resetsAt: resetMs ? RESETS_FORMATTER.format(new Date(resetMs)) : null,
+    resetsAtMs: resetMs,
+  }
+}
+
+function normalizePercent(value: unknown): number | null {
+  const numberValue = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN
+  if (!Number.isFinite(numberValue)) return null
+  return Math.max(0, Math.min(100, Math.round(numberValue)))
+}
+
+function normalizeTimestampMs(value: unknown): number | null {
+  if (typeof value === "number") return value > 1_000_000_000_000 ? value : value * 1000
+  if (typeof value === "string") {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) return normalizeTimestampMs(numeric)
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function labelForWindow(windowDurationMins: unknown): string | null {
+  const mins =
+    typeof windowDurationMins === "number"
+      ? windowDurationMins
+      : typeof windowDurationMins === "string"
+        ? Number(windowDurationMins)
+        : NaN
+  if (!Number.isFinite(mins) || mins <= 0) return null
+  if (mins === 300) return "5h 세션"
+  if (mins === 10080) return "주간"
+  if (mins % 1440 === 0) return `${mins / 1440}일`
+  if (mins % 60 === 0) return `${mins / 60}h`
+  return `${mins}분`
+}
+
+function modelValue(model: any): string {
+  return model?.model || model?.id || ""
+}
+
+function displayModelName(state: Record<string, any>, value: string): string {
+  const model = (state.models || []).find((item: any) => modelValue(item) === value)
+  return model?.displayName || value || "default"
+}
+
+function pickRuntimeSummary(state: Record<string, any>): SettingsSummaryView["runtime"] {
+  const settings = state.settings || {}
+  const summary = settings.config?.summary || {}
+  const configuredModel = summary.model || ""
+  const configuredEffort = summary.effort || ""
+  const activeModel = state.selectedModel || configuredModel || "default"
+  const activeEffort = state.selectedEffort || configuredEffort || "default"
+  return {
+    model: displayModelName(state, activeModel),
+    effort: activeEffort,
     approval: summary.approvalPolicy || "default",
     sandbox: summary.sandboxMode || "workspace",
+    modelDescription: state.selectedModel
+      ? `Codex Mobile override${configuredModel ? ` · 기본값 ${configuredModel}` : ""}`
+      : null,
+    effortDescription: state.selectedEffort
+      ? `Codex Mobile override${configuredEffort ? ` · 기본값 ${configuredEffort}` : ""}`
+      : null,
   }
 }
 
@@ -97,7 +189,13 @@ export function useSettingsSummary(state: Record<string, any>): SettingsSummaryV
 
   const account = useMemo(() => pickAccountSummary(settings), [accountRef])
   const usage = useMemo(() => pickUsageSummary(settings), [rateLimitsRef])
-  const runtime = useMemo(() => pickRuntimeSummary(settings), [configRef])
+  const selectedModelRef = state.selectedModel
+  const selectedEffortRef = state.selectedEffort
+  const modelsRef = state.models
+  const runtime = useMemo(
+    () => pickRuntimeSummary(state),
+    [configRef, selectedModelRef, selectedEffortRef, modelsRef],
+  )
   const plugins = useMemo(() => collectPlugins(pluginsRef), [pluginsRef])
   const skills = useMemo(() => collectSkills(skillsRef), [skillsRef])
   const apps = useMemo(() => collectApps(appsRef), [appsRef])

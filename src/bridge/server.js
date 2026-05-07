@@ -242,7 +242,11 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/local-file") {
-    await sendLocalImage(res, url.searchParams.get("id"));
+    await sendLocalImage(res, {
+      previewId: url.searchParams.get("id"),
+      filePath: url.searchParams.get("path"),
+      cwd: url.searchParams.get("cwd"),
+    });
     return;
   }
 
@@ -987,29 +991,56 @@ async function saveUploads(files) {
   return saved;
 }
 
-async function sendLocalImage(res, previewId) {
-  const preview = localPreviewFiles.get(String(previewId || ""));
-  if (!preview || preview.expiresAt < Date.now()) {
-    if (preview) localPreviewFiles.delete(String(previewId || ""));
-    sendJson(res, 404, { error: "Image preview not found" });
+async function sendLocalImage(res, { previewId, filePath, cwd }) {
+  const resolved = previewId
+    ? resolveUploadPreviewPath(previewId)
+    : resolveProjectImagePath(filePath, cwd);
+  if (!resolved.ok) {
+    sendJson(res, resolved.status, { error: resolved.error });
     return;
   }
-  const resolved = path.resolve(preview.path);
-  if (!isImageFile(resolved)) {
+
+  if (!isImageFile(resolved.path)) {
     sendJson(res, 415, { error: "Only local image previews are supported" });
     return;
   }
-  const stat = await fs.stat(resolved);
+  const stat = await fs.stat(resolved.path).catch(() => null);
+  if (!stat) {
+    sendJson(res, 404, { error: "Image preview not found" });
+    return;
+  }
   if (!stat.isFile() || stat.size > MAX_UPLOAD_BYTES) {
     sendJson(res, 413, { error: "Image preview is too large" });
     return;
   }
-  const data = await fs.readFile(resolved);
+  const data = await fs.readFile(resolved.path);
   res.writeHead(200, {
-    "content-type": contentType(resolved),
+    "content-type": contentType(resolved.path),
     "cache-control": "private, max-age=300",
   });
   res.end(data);
+}
+
+function resolveUploadPreviewPath(previewId) {
+  const preview = localPreviewFiles.get(String(previewId || ""));
+  if (!preview || preview.expiresAt < Date.now()) {
+    if (preview) localPreviewFiles.delete(String(previewId || ""));
+    return { ok: false, status: 404, error: "Image preview not found" };
+  }
+  return { ok: true, path: path.resolve(preview.path) };
+}
+
+function resolveProjectImagePath(filePath, cwd) {
+  if (!filePath || !cwd) return { ok: false, status: 400, error: "Missing image path" };
+  const root = path.resolve(String(cwd));
+  const candidate = String(filePath);
+  const resolved = path.isAbsolute(candidate)
+    ? path.resolve(candidate)
+    : path.resolve(root, candidate);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+    return { ok: false, status: 403, error: "Image path is outside the current project" };
+  }
+  return { ok: true, path: resolved };
 }
 
 function decodeUploadData(data) {
@@ -1172,11 +1203,11 @@ function normalizeAttachment(attachment) {
 }
 
 function isImageAttachment(mime, name) {
-  return String(mime || "").startsWith("image/") || /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(String(name || ""));
+  return String(mime || "").startsWith("image/") || /\.(png|jpe?g|gif|webp|heic|heif|svg)$/i.test(String(name || ""));
 }
 
 function isImageFile(filePath) {
-  return /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(String(filePath || ""));
+  return /\.(png|jpe?g|gif|webp|heic|heif|svg)$/i.test(String(filePath || ""));
 }
 
 function sendJson(res, status, value) {

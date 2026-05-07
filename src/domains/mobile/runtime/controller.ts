@@ -83,6 +83,15 @@ const app = document.querySelector("#app") as HTMLElement;
 
 const listeners = new Set<() => void>();
 let viewportListenersInstalled = false;
+let initPromise: Promise<void> | null = null;
+let modelsPromise: Promise<void> | null = null;
+let workspaceCacheWriteTimer: number | null = null;
+
+const LEGACY_CACHE_CLEANUP_KEY = "codexMobileLegacyCacheCleanup:v2";
+const WORKSPACE_CACHE_KEY = "codexMobileWorkspaceCache:v1";
+const WORKSPACE_CACHE_VERSION = 1;
+const WORKSPACE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const WORKSPACE_CACHE_MAX_BYTES = 900_000;
 
 export function subscribe(listener: () => void) {
   listeners.add(listener);
@@ -100,13 +109,22 @@ export function patchState(next: AnyRecord | ((current: AnyRecord) => AnyRecord)
 }
 
 function emit() {
+  syncDocumentState();
   state.version += 1;
   listeners.forEach((listener) => listener());
 }
 
 export async function init() {
+  if (initPromise) return initPromise;
+  initPromise = initRuntime().catch((error) => {
+    initPromise = null;
+    throw error;
+  });
+  return initPromise;
+}
+
+async function initRuntime() {
   installViewportListeners();
-  await removeLegacyWebAppCache();
   const pair = new URL(location.href).searchParams.get("pair");
   if (pair && !state.token) {
     const paired = await completePair(pair);
@@ -118,7 +136,10 @@ export async function init() {
     await loadDesktopStatus();
     return;
   }
-  await loadProjects();
+  const restored = hydrateWorkspaceCache();
+  void removeLegacyWebAppCache();
+  void loadModels().catch(() => {});
+  await loadProjects({ refreshCurrentThread: restored });
 }
 
 function installViewportListeners() {
@@ -137,14 +158,93 @@ function installViewportListeners() {
 }
 
 async function removeLegacyWebAppCache() {
-  if ("serviceWorker" in navigator) {
-    const registrations = await navigator.serviceWorker.getRegistrations().catch(() => []);
-    await Promise.all(registrations.map((registration) => registration.unregister().catch(() => false)));
-  }
+  if (localStorage.getItem(LEGACY_CACHE_CLEANUP_KEY) === "1") return;
   if ("caches" in window) {
     const keys = await caches.keys().catch(() => []);
     await Promise.all(keys.filter((key) => key.startsWith("codex-mobile")).map((key) => caches.delete(key).catch(() => false)));
   }
+  localStorage.setItem(LEGACY_CACHE_CLEANUP_KEY, "1");
+}
+
+function syncDocumentState() {
+  document.documentElement.dataset.sidebarOpen = state.sidebarOpen ? "true" : "false";
+}
+
+function hydrateWorkspaceCache() {
+  if (!state.token) return false;
+  try {
+    const raw = localStorage.getItem(WORKSPACE_CACHE_KEY);
+    if (!raw) return false;
+    const cached = JSON.parse(raw);
+    if (cached?.version !== WORKSPACE_CACHE_VERSION) return false;
+    if (Date.now() - Number(cached.savedAt || 0) > WORKSPACE_CACHE_MAX_AGE_MS) return false;
+    const projects = Array.isArray(cached.projects) ? cached.projects : [];
+    const threads = Array.isArray(cached.threads) ? cached.threads : [];
+    const thread = cached.thread && typeof cached.thread === "object" ? cached.thread : null;
+    if (!projects.length && !threads.length && !thread) return false;
+    const selectedProject =
+      projects.find((project) => project?.cwd && project.cwd === cached.selectedProjectCwd) ||
+      projects.find((project) => project?.cwd && project.cwd === thread?.cwd) ||
+      projects[0] ||
+      null;
+    state.projects = projects;
+    state.selectedProject = selectedProject;
+    state.threads = threads;
+    state.thread = thread;
+    state.selectedThread = thread || threads.find((candidate) => candidate?.id === cached.activeThreadId) || null;
+    state.screen = "workspace";
+    state.projectsLoading = false;
+    state.threadsLoading = false;
+    renderWorkspace();
+    return true;
+  } catch {
+    localStorage.removeItem(WORKSPACE_CACHE_KEY);
+    return false;
+  }
+}
+
+function summarizeThreadForCache(thread) {
+  if (!thread || typeof thread !== "object") return null;
+  const turns = Array.isArray(thread.turns) ? thread.turns.slice(-80) : [];
+  return {
+    ...thread,
+    turns: turns.map((turn) => ({
+      ...turn,
+      items: Array.isArray(turn?.items) ? turn.items.slice(-40) : turn?.items,
+    })),
+  };
+}
+
+function writeWorkspaceCache() {
+  if (!state.token) return;
+  const payload: AnyRecord = {
+    version: WORKSPACE_CACHE_VERSION,
+    savedAt: Date.now(),
+    selectedProjectCwd: state.selectedProject?.cwd || state.thread?.cwd || null,
+    activeThreadId: state.thread?.id || state.selectedThread?.id || null,
+    projects: Array.isArray(state.projects) ? state.projects.slice(0, 80) : [],
+    threads: Array.isArray(state.threads) ? state.threads.slice(0, 120) : [],
+    thread: summarizeThreadForCache(state.thread),
+  };
+  try {
+    let json = JSON.stringify(payload);
+    if (json.length > WORKSPACE_CACHE_MAX_BYTES && payload.thread) {
+      payload.thread = { ...payload.thread, turns: [] };
+      json = JSON.stringify(payload);
+    }
+    if (json.length <= WORKSPACE_CACHE_MAX_BYTES) localStorage.setItem(WORKSPACE_CACHE_KEY, json);
+  } catch {
+    // Local cache is opportunistic; network remains the source of truth.
+  }
+}
+
+function scheduleWorkspaceCacheWrite() {
+  if (!state.token) return;
+  if (workspaceCacheWriteTimer) window.clearTimeout(workspaceCacheWriteTimer);
+  workspaceCacheWriteTimer = window.setTimeout(() => {
+    workspaceCacheWriteTimer = null;
+    writeWorkspaceCache();
+  }, 250);
 }
 
 function renderCurrentView() {
@@ -280,7 +380,9 @@ export async function completePair(code) {
   }
 }
 
-async function loadProjects() {
+async function loadProjects(options: AnyRecord = {}) {
+  const previousProjectCwd = state.selectedProject?.cwd || state.thread?.cwd || null;
+  const previousThreadId = options.refreshCurrentThread ? state.thread?.id : null;
   state.projectsLoading = true;
   renderWorkspace();
   try {
@@ -288,12 +390,32 @@ async function loadProjects() {
     state.projects = result.projects || [];
     state.projectsLoading = false;
     connectEvents();
-    if (!state.selectedProject && state.projects.length) {
-      state.selectedProject = state.projects[0];
+    const selectedProject =
+      previousProjectCwd ? state.projects.find((project) => project.cwd === previousProjectCwd) : null;
+    if (selectedProject) {
+      state.selectedProject = selectedProject;
       renderWorkspace();
+      scheduleWorkspaceCacheWrite();
+      await loadThreads(selectedProject, {
+        selectFirst: !previousThreadId,
+        refreshThreadId: previousThreadId,
+      });
+      return;
+    }
+    if (state.projects.length) {
+      state.selectedProject = state.projects[0];
+      state.thread = null;
+      state.selectedThread = null;
+      renderWorkspace();
+      scheduleWorkspaceCacheWrite();
       await loadThreads(state.selectedProject, { selectFirst: true });
       return;
     }
+    state.selectedProject = null;
+    state.thread = null;
+    state.selectedThread = null;
+    state.threads = [];
+    scheduleWorkspaceCacheWrite();
     renderWorkspace();
   } catch (error) {
     state.projectsLoading = false;
@@ -351,21 +473,36 @@ function rememberActiveThread(cwd, threadId) {
 }
 
 async function loadThreads(project, options: AnyRecord = {}) {
+  const sameProject = state.selectedProject?.cwd === project.cwd;
   state.selectedProject = project;
   state.screen = "workspace";
   state.threadsLoading = true;
-  state.threads = [];
+  if (!sameProject) {
+    state.threads = [];
+    state.thread = null;
+    state.selectedThread = null;
+  }
   renderWorkspace();
   const query = new URLSearchParams({ cwd: project.cwd, limit: "100" });
   const result = await fetchJson(`/api/threads?${query.toString()}`);
   state.threads = result.data || [];
   state.threadsLoading = false;
+  const refreshThread = options.refreshThreadId
+    ? state.threads.find((thread) => thread.id === options.refreshThreadId)
+    : null;
+  if (refreshThread?.id) {
+    await loadThread(refreshThread.id);
+    scheduleWorkspaceCacheWrite();
+    return;
+  }
   if (options.selectFirst && !state.thread && state.threads[0]) {
     const rememberedThreadId = localStorage.getItem(activeThreadStorageKey(project.cwd));
     const preferredThread = state.threads.find((thread) => thread.id === rememberedThreadId) || state.threads[0];
     await loadThread(preferredThread.id);
+    scheduleWorkspaceCacheWrite();
     return;
   }
+  scheduleWorkspaceCacheWrite();
   renderWorkspace();
 }
 
@@ -390,6 +527,7 @@ async function loadThread(threadId) {
   state.selectedThread = state.thread;
   if (result?.latestEventId) state.eventsLastSeenId = String(result.latestEventId);
   rememberActiveThread(state.thread?.cwd || state.selectedProject?.cwd, threadId);
+  scheduleWorkspaceCacheWrite();
   state.approvals.clear();
   connectEvents();
   if (!isWideScreen()) state.sidebarOpen = false;
@@ -408,16 +546,23 @@ async function loadThread(threadId) {
 
 async function loadModels() {
   if (state.models.length) return;
-  const result = await fetchJson("/api/models");
-  state.models = (result.models || []).filter((model) => !model.hidden);
-  state.modelConfig = result.config || null;
-  if (!state.selectedModel) {
-    state.selectedModel = state.modelConfig?.model || state.models.find((model) => model.isDefault)?.model || state.models[0]?.model || "";
-  }
-  if (!state.selectedEffort) {
-    const current = state.models.find((model) => model.model === state.selectedModel || model.id === state.selectedModel);
-    state.selectedEffort = state.modelConfig?.effort || current?.defaultReasoningEffort || "";
-  }
+  if (modelsPromise) return modelsPromise;
+  modelsPromise = (async () => {
+    const result = await fetchJson("/api/models");
+    state.models = (result.models || []).filter((model) => !model.hidden);
+    state.modelConfig = result.config || null;
+    if (!state.selectedModel) {
+      state.selectedModel = state.modelConfig?.model || state.models.find((model) => model.isDefault)?.model || state.models[0]?.model || "";
+    }
+    if (!state.selectedEffort) {
+      const current = state.models.find((model) => model.model === state.selectedModel || model.id === state.selectedModel);
+      state.selectedEffort = state.modelConfig?.effort || current?.defaultReasoningEffort || "";
+    }
+    emit();
+  })().finally(() => {
+    modelsPromise = null;
+  });
+  return modelsPromise;
 }
 
 async function loadThreadContext(threadId) {
@@ -927,6 +1072,7 @@ function forceUnauthenticated() {
     state.eventsWatchdogTimer = null;
   }
   localStorage.removeItem("codexMobileToken");
+  localStorage.removeItem(WORKSPACE_CACHE_KEY);
   state.token = null;
   state.projects = [];
   state.threads = [];
@@ -1088,6 +1234,7 @@ function applyCodexEvent(event) {
     loadThread(state.thread.id).catch(() => {});
   }
 
+  scheduleWorkspaceCacheWrite();
   scheduleRenderAfterEvent({ immediate: immediateRender });
 }
 
@@ -1164,6 +1311,7 @@ async function refreshThreadSnapshot(threadId) {
   state.selectedThread = state.thread;
   if (result?.latestEventId) state.eventsLastSeenId = String(result.latestEventId);
   state.realtimeLastSyncedAt = Date.now();
+  scheduleWorkspaceCacheWrite();
   renderThread({ timelineOnly: isComposerFocused() && state.activeTab === "chat" });
 }
 
@@ -2579,7 +2727,8 @@ function renderMarkdown(text) {
 
   const flushParagraph = () => {
     if (!paragraph.length) return;
-    blocks.push(`<p>${renderInlineMarkdown(paragraph.join(" ").trim())}</p>`);
+    const value = paragraph.join(" ").trim();
+    blocks.push(renderMarkdownImageBlock(value) || `<p>${renderInlineMarkdown(value)}</p>`);
     paragraph = [];
   };
   const flushCode = () => {
@@ -2701,6 +2850,7 @@ function splitMarkdownRow(row) {
 function renderInlineMarkdown(value) {
   const escaped = escapeHtml(value);
   return escaped
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_match, label, href) => renderMarkdownImage(label, href, true))
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, href) => renderMarkdownLink(label, href))
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
@@ -2708,15 +2858,85 @@ function renderInlineMarkdown(value) {
     .replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
 }
 
-function renderMarkdownLink(label, href) {
-  if (/^https?:\/\//i.test(href)) {
-    return `<a href="${escapeAttr(href)}" target="_blank" rel="noreferrer">${label}</a>`;
+function renderMarkdownImageBlock(value) {
+  const source = String(value || "").trim();
+  const imagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  const linkPattern = /\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let matches = [...source.matchAll(imagePattern)].map((match) => [match[1] || "", match[2] || ""]);
+  let rest = source.replace(imagePattern, "").trim();
+  if (!matches.length) {
+    matches = [...source.matchAll(linkPattern)]
+      .filter((match) => isImageMarkdownHref(match[2]))
+      .map((match) => [match[1] || "", match[2] || ""]);
+    rest = source
+      .replace(linkPattern, (full, _label, href) => (isImageMarkdownHref(href) ? "" : full))
+      .trim();
   }
-  if (isLocalMarkdownHref(href)) {
-    const display = formatLocalMarkdownLinkLabel(label, href);
-    return `<code class="code-ref" title="${escapeAttr(href)}">${display}</code>`;
+  if (!matches.length) return "";
+  if (rest) return "";
+  const images = matches
+    .map((match) => renderMarkdownImage(match[0] || "", match[1] || "", false))
+    .filter(Boolean);
+  if (!images.length) return "";
+  return `<div class="markdown-image-row">${images.join("")}</div>`;
+}
+
+function renderMarkdownImage(label, href, inline = false) {
+  const normalizedHref = decodeMarkdownHref(href);
+  const src = imageSrcFromHref(normalizedHref);
+  if (!src) return inline ? label : "";
+  const alt = stripHtml(label || pathBasename(normalizedHref));
+  if (inline) {
+    return `<span class="markdown-image-inline"><img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" loading="lazy" /></span>`;
+  }
+  return `
+    <figure class="markdown-image">
+      <img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" loading="lazy" />
+      ${alt ? `<figcaption>${escapeHtml(alt)}</figcaption>` : ""}
+    </figure>
+  `;
+}
+
+function renderMarkdownLink(label, href) {
+  const normalizedHref = decodeMarkdownHref(href);
+  if (isImageMarkdownHref(normalizedHref)) {
+    return renderMarkdownImage(label, normalizedHref, true);
+  }
+  if (/^https?:\/\//i.test(normalizedHref)) {
+    return `<a href="${escapeAttr(normalizedHref)}" target="_blank" rel="noreferrer">${label}</a>`;
+  }
+  if (isLocalMarkdownHref(normalizedHref)) {
+    const display = formatLocalMarkdownLinkLabel(label, normalizedHref);
+    return `<code class="code-ref" title="${escapeAttr(normalizedHref)}">${display}</code>`;
   }
   return label;
+}
+
+function isImageMarkdownHref(href) {
+  const value = decodeMarkdownHref(href);
+  if (isLocalFileImageUrl(value)) return true;
+  if (/^https?:\/\//i.test(value)) return isRemoteImageUrl(value);
+  return Boolean(imageSrcFromHref(value));
+}
+
+function decodeMarkdownHref(href) {
+  return String(href || "")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#039;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">");
+}
+
+function imageSrcFromHref(href) {
+  const value = String(href || "");
+  if (isLocalFileImageUrl(value)) return normalizeLocalFileImageUrl(value);
+  if (/^https?:\/\//i.test(value)) return value;
+  if (/^blob:/i.test(value)) return value;
+  if (/^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(value)) return value;
+  if (/^\/(?:api|assets)\//i.test(value)) return value;
+  if (!isImagePath(value)) return "";
+  return localPreviewUrl({ path: value, isImage: true });
 }
 
 function isLocalMarkdownHref(href) {
@@ -2741,7 +2961,7 @@ function renderAttachmentPreviews(attachments = []) {
       ${attachments.map((attachment) => {
         const name = attachment.name || pathBasename(attachment.path || attachment.url || "Attachment");
         const image = attachment.isImage || isImagePath(name) || isImagePath(attachment.path || attachment.url || "");
-        const src = attachment.previewUrl || attachment.url || localPreviewUrl(attachment);
+        const src = localPreviewUrl(attachment);
         if (image && src) {
           return `
             <figure class="attachment-preview image-preview">
@@ -2788,15 +3008,21 @@ function extractAttachments(value) {
       return;
     }
     const type = String(node.type || node.kind || "");
-    const pathValue = node.path || node.filePath || node.localPath;
-    const urlValue = node.url || node.imageUrl || node.image_url;
+    const pathValue = firstString(node.path, node.filePath, node.localPath, node.filename, node.file);
+    const urlValue = firstString(node.url, node.src, node.uri, node.href, node.imageUrl, node.image_url, node.image?.url, node.source?.url);
     const mime = String(node.mime || node.mimeType || "");
-    const imageHint = /image|localImage|image_url/.test(type) || mime.startsWith("image/");
+    const imageHint =
+      /image|localImage|image_url|screenshot|figure/.test(type) ||
+      mime.startsWith("image/") ||
+      isRasterDataUrl(urlValue) ||
+      isImagePath(pathValue) ||
+      isImagePath(urlValue);
     if (imageHint && (pathValue || urlValue)) {
       attachments.push({
-        name: node.name || pathBasename(pathValue || urlValue),
+        name: node.name || node.title || node.alt || pathBasename(pathValue || urlValue),
         path: pathValue || null,
         url: urlValue || null,
+        mime: mime || null,
         isImage: true,
       });
       return;
@@ -2805,6 +3031,17 @@ function extractAttachments(value) {
   };
   visit(value);
   return attachments;
+}
+
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+    if (value && typeof value === "object") {
+      const nested = firstString(value.url, value.src, value.uri, value.path);
+      if (nested) return nested;
+    }
+  }
+  return "";
 }
 
 function dedupeAttachments(attachments = []) {
@@ -2818,9 +3055,48 @@ function dedupeAttachments(attachments = []) {
 }
 
 function localPreviewUrl(attachment) {
+  const directUrl = firstString(attachment.previewUrl, attachment.url, attachment.src);
+  if (isLocalFileImageUrl(directUrl)) return normalizeLocalFileImageUrl(directUrl);
+  if (directUrl && (isRemoteImageUrl(directUrl) || isRasterDataUrl(directUrl) || /^\/(?:api|assets)\//i.test(directUrl))) {
+    return directUrl;
+  }
   const previewId = attachment.previewId || attachment.id || state.previewIdsByPath[attachment.path];
-  if (!previewId) return "";
-  return `/api/local-file?id=${encodeURIComponent(previewId)}&token=${encodeURIComponent(state.token || "")}`;
+  if (previewId) return `/api/local-file?id=${encodeURIComponent(previewId)}&token=${encodeURIComponent(state.token || "")}`;
+  const imagePath = firstString(attachment.path, attachment.filePath, attachment.localPath);
+  const cwd = state.selectedProject?.cwd || state.thread?.cwd || "";
+  if (!imagePath || !cwd || !isImagePath(imagePath)) return "";
+  const query = new URLSearchParams({
+    path: imagePath,
+    cwd,
+    token: state.token || "",
+  });
+  return `/api/local-file?${query.toString()}`;
+}
+
+function isLocalFileImageUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  try {
+    return new URL(raw, "http://codex-mobile.local").pathname === "/api/local-file";
+  } catch {
+    return /^\/api\/local-file(?:[?#]|$)/i.test(raw);
+  }
+}
+
+function normalizeLocalFileImageUrl(value) {
+  const raw = String(value || "").trim();
+  try {
+    const url = new URL(raw, "http://codex-mobile.local");
+    if (state.token) url.searchParams.set("token", state.token);
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    if (!state.token) return raw;
+    const withoutToken = raw
+      .replace(/([?&])token=[^&#]*/i, "$1")
+      .replace(/[?&](#|$)/, "$1");
+    const separator = withoutToken.includes("?") ? "&" : "?";
+    return `${withoutToken}${separator}token=${encodeURIComponent(state.token)}`;
+  }
 }
 
 function pathBasename(value) {
@@ -2828,7 +3104,19 @@ function pathBasename(value) {
 }
 
 function isImagePath(value) {
-  return /\.(png|jpe?g|gif|webp|bmp|heic|heif)$/i.test(String(value || ""));
+  return /\.(png|jpe?g|gif|webp|bmp|heic|heif|svg)(?:[?#].*)?$/i.test(String(value || ""));
+}
+
+function isRemoteImageUrl(value) {
+  return /^https?:\/\//i.test(String(value || "")) && isImagePath(value);
+}
+
+function isRasterDataUrl(value) {
+  return /^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(String(value || ""));
+}
+
+function stripHtml(value) {
+  return String(value || "").replace(/<[^>]*>/g, "");
 }
 
 function renderApproval(approval) {

@@ -1,7 +1,17 @@
-import { FolderOpen, MessageSquare, PanelLeft, PanelLeftOpen, RefreshCw, Share2, Sparkles } from "lucide-react"
+import { FolderOpen, MessageSquare, MoreHorizontal, PanelLeft, PanelLeftOpen, RefreshCw, Share2, Sparkles } from "lucide-react"
 
 import { mobileController, patchState } from "@/domains/mobile/runtime/controller"
 import { Button } from "@/common/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/common/ui/dropdown-menu"
 import { cn } from "@/common/lib/utils"
 import { useWorkspaceHeader } from "@/common/hooks/use-workspace-header"
 import { Sidebar, SidebarToggle } from "@/domains/mobile/components/sidebar"
@@ -38,12 +48,12 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
   return (
     <div
       className={cn(
-        "flex h-dvh overflow-hidden bg-[var(--canvas)] text-[var(--ink)] lg:grid lg:grid-rows-[100%]",
+        "codex-workspace-shell flex h-dvh overflow-hidden bg-[var(--canvas)] text-[var(--ink)] lg:grid lg:grid-rows-[100%]",
         desktopSidebarCollapsed
           ? "lg:grid-cols-[minmax(0,1fr)]"
           : "lg:grid-cols-[320px_minmax(0,1fr)]",
       )}
-      style={{ height: "100dvh", maxWidth: "100vw" }}
+      style={{ height: "var(--app-viewport-height)", maxWidth: "100vw" }}
     >
       <Sidebar state={state} desktopCollapsed={desktopSidebarCollapsed} />
 
@@ -57,7 +67,7 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
 
         {/* Slim breadcrumb header — pt = iOS notch/status bar safe area */}
         <header
-          className="sticky top-0 z-20 border-b border-[var(--hairline-soft)] bg-[var(--canvas)]"
+          className="codex-topbar sticky top-0 z-20 border-b border-[var(--hairline-soft)] bg-[var(--canvas)]"
           style={{ paddingTop: "env(safe-area-inset-top)" }}
         >
           <div className="mx-auto flex h-12 w-full max-w-3xl items-center gap-2 px-3">
@@ -87,75 +97,57 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
               <span className="truncate text-[13px] font-medium text-[var(--ink-strong)]">{title}</span>
             </div>
             <div className="flex items-center gap-0.5">
-              {state.thread ? (
-                <div
-                  role="tablist"
-                  aria-label="View"
-                  className="mr-0.5 flex items-center rounded-md border border-[var(--hairline-soft)] bg-[var(--canvas-soft)] p-0.5"
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="rounded-md hover:bg-[var(--row-hover)]"
+                    aria-label="Thread actions"
+                    title="Thread actions"
+                  >
+                    <MoreHorizontal className="size-4 text-[var(--muted-text)]" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  sideOffset={8}
+                  className="w-56 rounded-2xl border-[var(--hairline-soft)] bg-[color-mix(in_srgb,var(--surface-warm)_92%,transparent)] p-1.5 shadow-[0_18px_48px_rgba(0,0,0,0.22)] backdrop-blur-xl"
                 >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={state.activeTab === "chat"}
-                    aria-label="Chat"
-                    onClick={() => patchState({ activeTab: "chat" })}
-                    className={cn(
-                      "inline-flex h-7 items-center gap-1 rounded-[5px] px-2 text-[12px] font-medium transition-colors",
-                      state.activeTab === "chat"
-                        ? "bg-[var(--surface-warm)] text-[var(--ink-strong)] shadow-[0_1px_0_rgba(255,255,255,0.04)]"
-                        : "text-[var(--muted-text)] hover:text-[var(--ink-strong)]",
-                    )}
+                  <DropdownMenuLabel>View</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup
+                    value={state.activeTab || "chat"}
+                    onValueChange={(value) => patchState({ activeTab: value })}
                   >
-                    <MessageSquare className="size-3.5" />
-                    <span className="hidden min-[360px]:inline">Chat</span>
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={state.activeTab === "changes"}
-                    aria-label="Changes"
-                    onClick={() => patchState({ activeTab: "changes" })}
-                    className={cn(
-                      "inline-flex h-7 items-center gap-1 rounded-[5px] px-2 text-[12px] font-medium transition-colors",
-                      state.activeTab === "changes"
-                        ? "bg-[var(--surface-warm)] text-[var(--ink-strong)] shadow-[0_1px_0_rgba(255,255,255,0.04)]"
-                        : "text-[var(--muted-text)] hover:text-[var(--ink-strong)]",
-                    )}
+                    <DropdownMenuRadioItem value="chat" disabled={!state.thread}>
+                      <MessageSquare className="size-4" />
+                      <span>Chat</span>
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="changes" disabled={!state.thread}>
+                      <Sparkles className="size-4" />
+                      <span className="min-w-0 flex-1">Changes</span>
+                      {changesCount ? (
+                        <span className="ml-auto text-[11px] tabular-nums text-[var(--muted-text)]">{changesCount}</span>
+                      ) : null}
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    disabled={!state.thread || state.realtimeRefreshing}
+                    onSelect={() => void mobileController.refreshRealtime()}
                   >
-                    <Sparkles className="size-3.5" />
-                    <span className="hidden min-[360px]:inline">Changes</span>
-                    {changesCount ? (
-                      <span className="text-[11px] tabular-nums text-[var(--muted-text)]">{changesCount}</span>
-                    ) : null}
-                  </button>
-                </div>
-              ) : null}
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="rounded-md hover:bg-[var(--row-hover)]"
-                aria-label="Refresh chat"
-                title="Refresh chat"
-                onClick={() => void mobileController.refreshRealtime()}
-                disabled={!state.thread || state.realtimeRefreshing}
-              >
-                <RefreshCw
-                  className={cn(
-                    "size-4 text-[var(--muted-text)]",
-                    state.realtimeRefreshing && "animate-spin",
-                  )}
-                />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="rounded-md hover:bg-[var(--row-hover)]"
-                aria-label="Share thread"
-                onClick={() => void shareThread(state)}
-                disabled={!state.thread}
-              >
-                <Share2 className="size-4 text-[var(--muted-text)]" />
-              </Button>
+                    <RefreshCw className={cn("size-4", state.realtimeRefreshing && "animate-spin")} />
+                    <span>Refresh chat</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!state.thread}
+                    onSelect={() => void shareThread(state)}
+                  >
+                    <Share2 className="size-4" />
+                    <span>Share thread</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -170,7 +162,7 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
         </header>
 
         <main id="main-content" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--canvas)]">
-          <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div key={state.activeTab || "chat"} className="codex-pane-enter min-h-0 min-w-0 flex-1 overflow-hidden">
             {state.activeTab === "changes" ? <ChangesPane state={state} /> : <ChatPane state={state} />}
           </div>
           {state.screen === "workspace" && state.activeTab === "chat" ? <Composer state={state} /> : null}
