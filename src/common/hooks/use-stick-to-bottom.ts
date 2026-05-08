@@ -52,14 +52,21 @@ export function useStickToBottom<T extends HTMLElement>({
   // Latest "is at bottom" decision, used inside the layout effect without
   // forcing the effect to depend on the state value (rerender-defer-reads).
   const stickyRef = useRef(true)
+  const measuredRef = useRef({ hasOverflow: false, isAtBottom: true })
 
   const measure = useCallback(() => {
     const el = ref.current
     if (!el) return
     const overflow = el.scrollHeight - el.clientHeight > 1
     const atBottom = !overflow || distanceFromBottom(el) <= threshold
-    setHasOverflow(overflow)
-    setIsAtBottom(atBottom)
+    if (measuredRef.current.hasOverflow !== overflow) {
+      measuredRef.current.hasOverflow = overflow
+      setHasOverflow(overflow)
+    }
+    if (measuredRef.current.isAtBottom !== atBottom) {
+      measuredRef.current.isAtBottom = atBottom
+      setIsAtBottom(atBottom)
+    }
     stickyRef.current = atBottom
   }, [ref, threshold])
 
@@ -99,7 +106,10 @@ export function useStickToBottom<T extends HTMLElement>({
         behavior: smooth ? "smooth" : "auto",
       })
       stickyRef.current = true
-      setIsAtBottom(true)
+      if (!measuredRef.current.isAtBottom) {
+        measuredRef.current.isAtBottom = true
+        setIsAtBottom(true)
+      }
     },
     [ref],
   )

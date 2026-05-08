@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 
 type Platform = "android-chrome" | "ios-safari" | "desktop" | "other"
 
@@ -66,13 +66,13 @@ export function usePwaInstall() {
     stableOrigin &&
     (platform === "android-chrome" ? installEvent !== null : platform === "ios-safari")
 
-  async function promptInstall(): Promise<"accepted" | "dismissed" | "unavailable"> {
+  const promptInstall = useCallback(async (): Promise<"accepted" | "dismissed" | "unavailable"> => {
     if (!installEvent) return "unavailable"
     await installEvent.prompt()
     const choice = await installEvent.userChoice
     setInstallEvent(null)
     return choice.outcome
-  }
+  }, [installEvent])
 
   return { canInstall, platform, stableOrigin, standalone, promptInstall }
 }

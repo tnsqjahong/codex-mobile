@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFile as execFileCallback, spawn } from "node:child_process";
+import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -109,21 +110,57 @@ async function startBackgroundCompanion() {
     ...args.filter((arg) => arg !== "--background"),
     "--no-open",
   ];
+  const logPath = openBackgroundLogFile();
+  const logFd = fs.openSync(logPath, "a");
   const child = spawn(process.execPath, childArgs, {
     cwd: rootDir,
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", logFd, logFd],
     env: {
       ...process.env,
       CODEX_MOBILE_FOREGROUND: "1",
       ...(publicUrl ? { PUBLIC_URL: publicUrl } : {}),
     },
   });
+  // Parent can drop its handle once spawn handed it to the child.
+  fs.closeSync(logFd);
   child.unref();
   await waitForBridge(child);
   const mobileUrl = await waitForMobileUrl(child, runningUrl);
   if (openBrowser) await openUrl(desktopUrl);
   printReadyUrls("running in background", mobileUrl || desktopUrl);
+  console.log(`Bridge log: ${logPath}`);
+}
+
+// --- background log files ---------------------------------------------------
+//
+// Background mode used to spawn with `stdio: "ignore"`, which made silent
+// crashes unobservable (no stack traces anywhere). Now each `--background`
+// boot opens a timestamped file under `<repo>/logs/` and pipes the bridge's
+// stdout+stderr there. A stable `logs/codex-mobile-latest.log` symlink is
+// refreshed on every boot so `tail -f logs/codex-mobile-latest.log` keeps
+// working without knowing the current timestamp.
+//
+// `logs/` is gitignored — these files contain runtime tokens / errors that
+// must not be committed.
+
+function openBackgroundLogFile() {
+  const logsDir = path.join(rootDir, "logs");
+  fs.mkdirSync(logsDir, { recursive: true });
+  const ts = new Date()
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "Z")
+    .replace(/:/g, "-");
+  const target = path.join(logsDir, `codex-mobile-${ts}.log`);
+  // Refresh the `latest` symlink — best-effort, never let it break startup.
+  const latest = path.join(logsDir, "codex-mobile-latest.log");
+  try {
+    fs.rmSync(latest, { force: true });
+    fs.symlinkSync(path.basename(target), latest);
+  } catch {
+    /* symlink unsupported (e.g. Windows without privileges) → just skip */
+  }
+  return target;
 }
 
 async function resolveFunnelUrl({ allowEnable = false } = {}) {

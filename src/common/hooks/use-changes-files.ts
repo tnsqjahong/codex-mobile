@@ -1,3 +1,5 @@
+import { useMemo } from "react"
+
 export type ChangeFile = {
   path: string
   status: string
@@ -26,37 +28,39 @@ export type ChangesView = {
 }
 
 export function useChangesFiles(state: Record<string, any>): ChangesView {
-  const changes = state.changes
-  const summary = {
-    filesChanged: changes?.summary?.filesChanged ?? 0,
-    additions: changes?.summary?.additions ?? 0,
-    deletions: changes?.summary?.deletions ?? 0,
-  }
-  const turnDiff = changes?.turnDiff?.diff ? changes.turnDiff : null
+  return useMemo(() => {
+    const changes = state.changes
+    const summary = {
+      filesChanged: changes?.summary?.filesChanged ?? 0,
+      additions: changes?.summary?.additions ?? 0,
+      deletions: changes?.summary?.deletions ?? 0,
+    }
+    const turnDiff = changes?.turnDiff?.diff ? changes.turnDiff : null
 
-  const files: ChangeFile[] = []
-  const rawFiles: any[] = changes?.files || []
-  for (const file of rawFiles) {
-    const path = file.path || file.filePath || file.name || ""
-    if (!path) continue
-    files.push({
-      ...file,
-      path,
-      displayPath: file.displayPath || path,
-      status: file.status || file.changeType || "M",
-    })
-  }
+    const files: ChangeFile[] = []
+    const rawFiles: any[] = changes?.files || []
+    for (const file of rawFiles) {
+      const path = file.path || file.filePath || file.name || ""
+      if (!path) continue
+      files.push({
+        ...file,
+        path,
+        displayPath: file.displayPath || path,
+        status: file.status || file.changeType || "M",
+      })
+    }
 
-  return {
-    summary,
-    turnDiff,
-    files,
-    repositories: changes?.repositories || [],
-    canCommit: changes?.canCommit !== false && !changes?.workspace,
-    workspace: Boolean(changes?.workspace),
-    truncatedFiles: changes?.truncatedFiles ?? 0,
-    truncatedRepositories: changes?.truncatedRepositories ?? 0,
-    loading: Boolean(state.changesLoading),
-    error: state.changesError || changes?.error || "",
-  }
+    return {
+      summary,
+      turnDiff,
+      files,
+      repositories: changes?.repositories || [],
+      canCommit: changes?.canCommit !== false && !changes?.workspace,
+      workspace: Boolean(changes?.workspace),
+      truncatedFiles: changes?.truncatedFiles ?? 0,
+      truncatedRepositories: changes?.truncatedRepositories ?? 0,
+      loading: Boolean(state.changesLoading),
+      error: state.changesError || changes?.error || "",
+    }
+  }, [state.changes, state.changesError, state.changesLoading])
 }

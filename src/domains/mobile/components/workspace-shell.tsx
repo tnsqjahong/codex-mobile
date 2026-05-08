@@ -1,3 +1,4 @@
+import { useCallback, useMemo } from "react"
 import { FolderOpen, MessageSquare, MoreHorizontal, PanelLeft, PanelLeftOpen, RefreshCw, Share2, Sparkles } from "lucide-react"
 
 import { mobileController, patchState } from "@/domains/mobile/runtime/controller"
@@ -18,8 +19,7 @@ import { Sidebar, SidebarToggle } from "@/domains/mobile/components/sidebar"
 import { ChatPane, ChangesPane } from "@/domains/mobile/components/chat-pane"
 import { Composer } from "@/domains/mobile/components/composer"
 
-async function shareThread(state: Record<string, any>) {
-  const title = state.thread?.name || state.thread?.preview || "Codex thread"
+async function shareThread(title: string) {
   const url = window.location.href
   const text = `${title}\n${url}`
   try {
@@ -44,6 +44,17 @@ function toggleDesktopSidebar() {
 export function WorkspaceShell({ state }: { state: Record<string, any> }) {
   const { title, projectName, changesCount } = useWorkspaceHeader(state)
   const desktopSidebarCollapsed = Boolean(state.desktopSidebarCollapsed)
+  const headerTitle = useMemo(() => [projectName, title].filter(Boolean).join(" / "), [projectName, title])
+  const threadShareTitle = state.thread?.name || state.thread?.preview || "Codex thread"
+  const setActiveTab = useCallback((value: string) => {
+    patchState({ activeTab: value })
+  }, [])
+  const refreshRealtime = useCallback(() => {
+    void mobileController.refreshRealtime()
+  }, [])
+  const shareCurrentThread = useCallback(() => {
+    void shareThread(threadShareTitle)
+  }, [threadShareTitle])
 
   return (
     <div
@@ -65,9 +76,8 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
           본문으로 바로가기
         </a>
 
-        {/* Slim breadcrumb header — pt = iOS notch/status bar safe area */}
         <header
-          className="codex-topbar sticky top-0 z-20 border-b border-[var(--hairline-soft)] bg-[var(--canvas)]"
+          className="codex-topbar sticky top-0 z-20 border-b-0 bg-transparent"
           style={{ paddingTop: "env(safe-area-inset-top)" }}
         >
           <div className="mx-auto flex h-12 w-full max-w-3xl items-center gap-2 px-3">
@@ -85,9 +95,9 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
             ) : null}
             <div
               className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1 text-left"
-              title={[projectName, title].filter(Boolean).join(" / ")}
+              title={headerTitle}
             >
-              <FolderOpen className="size-4 shrink-0 text-[var(--muted-text)]" />
+              <FolderOpen className="hidden size-4 shrink-0 text-[var(--muted-text)] sm:block" />
               {projectName ? (
                 <span className="hidden truncate text-[13px] text-[var(--ink-strong)] sm:inline">{projectName}</span>
               ) : null}
@@ -96,13 +106,13 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
               ) : null}
               <span className="truncate text-[13px] font-medium text-[var(--ink-strong)]">{title}</span>
             </div>
-            <div className="flex items-center gap-0.5">
+            <div className="flex items-center justify-end gap-0.5">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
                     variant="ghost"
                     size="icon-sm"
-                    className="rounded-md hover:bg-[var(--row-hover)]"
+                    className="codex-mobile-header-circle rounded-md hover:bg-[var(--row-hover)]"
                     aria-label="Thread actions"
                     title="Thread actions"
                   >
@@ -117,7 +127,7 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
                   <DropdownMenuLabel>View</DropdownMenuLabel>
                   <DropdownMenuRadioGroup
                     value={state.activeTab || "chat"}
-                    onValueChange={(value) => patchState({ activeTab: value })}
+                    onValueChange={setActiveTab}
                   >
                     <DropdownMenuRadioItem value="chat" disabled={!state.thread}>
                       <MessageSquare className="size-4" />
@@ -134,14 +144,14 @@ export function WorkspaceShell({ state }: { state: Record<string, any> }) {
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     disabled={!state.thread || state.realtimeRefreshing}
-                    onSelect={() => void mobileController.refreshRealtime()}
+                    onSelect={refreshRealtime}
                   >
                     <RefreshCw className={cn("size-4", state.realtimeRefreshing && "animate-spin")} />
                     <span>Refresh chat</span>
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     disabled={!state.thread}
-                    onSelect={() => void shareThread(state)}
+                    onSelect={shareCurrentThread}
                   >
                     <Share2 className="size-4" />
                     <span>Share thread</span>

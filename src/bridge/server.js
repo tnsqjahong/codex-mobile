@@ -27,6 +27,8 @@ const TICKET_SWEEP_MS = 60_000;
 const TICKET_TTL_MS = 30_000;
 const SSE_BUFFER_MAX = 500;
 const EVENT_LOOKUP_MAX = 2_000;
+const THREAD_ITEM_SNAPSHOT_MAX_THREADS = 120;
+const THREAD_ITEM_SNAPSHOT_MAX_ITEMS_PER_THREAD = 400;
 let sseEventCounter = 0;
 const sseEventBuffer = [];
 const tickets = new Map();
@@ -35,6 +37,7 @@ const sessions = new Map();
 const activeTurns = new Map();
 const turnThreads = new Map();
 const itemThreads = new Map();
+const threadItemSnapshots = new Map();
 const diffSnapshots = new Map();
 const tokenUsageSnapshots = new Map();
 const responseCache = new Map();
@@ -347,7 +350,7 @@ async function handleApi(req, res, url) {
       rpc.request("config/read", {}).catch((error) => ({ error: cleanCommandOutput(error.message || error) })),
       rpc.request("configRequirements/read", {}).catch((error) => ({ error: cleanCommandOutput(error.message || error) })),
       rpc.request("plugin/list", { cwds: cwd ? [cwd] : null }).catch((error) => ({ error: cleanCommandOutput(error.message || error), marketplaces: [] })),
-      rpc.request("skills/list", { cwds: cwd ? [cwd] : [], forceReload: false }).catch((error) => ({ error: cleanCommandOutput(error.message || error), data: [] })),
+      rpc.request("skills/list", { cwds: cwd ? [cwd] : [], forceReload: true }).catch((error) => ({ error: cleanCommandOutput(error.message || error), data: [] })),
       rpc.request("app/list", { limit: 100 }).catch((error) => ({ error: cleanCommandOutput(error.message || error), data: [] })),
       rpc.request("mcpServerStatus/list", { detail: "toolsAndAuthOnly", limit: 100 }).catch((error) => ({ error: cleanCommandOutput(error.message || error), mcpServers: [] })),
       rpc.request("experimentalFeature/list", {}).catch((error) => ({ error: cleanCommandOutput(error.message || error), data: [] })),
@@ -385,7 +388,8 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/skills") {
     await ensureAppServerStarted();
     const cwd = url.searchParams.get("cwd");
-    const skills = await rpc.request("skills/list", { cwds: cwd ? [cwd] : [], forceReload: false })
+    const forceReload = url.searchParams.get("force") === "1";
+    const skills = await rpc.request("skills/list", { cwds: cwd ? [cwd] : [], forceReload })
       .catch((error) => ({ error: cleanCommandOutput(error.message || error), data: [] }));
     sendJson(res, 200, { data: flattenSkills(summarizeSkills(skills)) });
     return;
@@ -402,10 +406,12 @@ async function handleApi(req, res, url) {
   const threadMatch = url.pathname.match(/^\/api\/threads\/([^/]+)$/);
   if (req.method === "GET" && threadMatch) {
     await ensureAppServerStarted();
+    const threadId = decodeURIComponent(threadMatch[1]);
     const result = await rpc.request("thread/read", {
-      threadId: decodeURIComponent(threadMatch[1]),
+      threadId,
       includeTurns: true,
     });
+    if (result?.thread) result.thread = mergeThreadItemSnapshots(result.thread, threadId);
     // Anchor for gap-free SSE resume: client passes this back as ?lastEventId=
     // when (re)opening EventSource so the ring buffer replays anything that
     // arrived between this snapshot and the SSE handshake.
@@ -460,9 +466,11 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && tokenUsageMatch) {
     await ensureAppServerStarted();
     const threadId = decodeURIComponent(tokenUsageMatch[1]);
+    const liveSnapshot = tokenUsageSnapshots.get(threadId) || null;
+    const fallbackSnapshot = liveSnapshot ? null : await readThreadTokenUsageFallback(threadId).catch(() => null);
     sendJson(res, 200, {
       threadId,
-      tokenUsage: tokenUsageSnapshots.get(threadId) || null,
+      tokenUsage: liveSnapshot || fallbackSnapshot || null,
     });
     return;
   }
@@ -761,19 +769,17 @@ async function listAutomations() {
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
   const automationDir = path.join(codexHome, "automations");
   const entries = await fs.readdir(automationDir, { withFileTypes: true }).catch(() => []);
-  const data = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+  const data = await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
     const tomlPath = path.join(automationDir, entry.name, "automation.toml");
     const text = await fs.readFile(tomlPath, "utf8").catch(() => "");
-    data.push({
+    return {
       id: entry.name,
       name: extractTomlString(text, "name") || entry.name,
       status: extractTomlString(text, "status") || null,
       kind: extractTomlString(text, "kind") || null,
       prompt: extractTomlString(text, "prompt") || null,
-    });
-  }
+    };
+  }));
   return { data };
 }
 
@@ -851,6 +857,10 @@ function trackTurn(message) {
   if (message.method === "turn/started" && threadId && turnId) {
     activeTurns.set(threadId, turnId);
   }
+  const snapshotItem = normalizeSnapshotItem(params, turnId);
+  if (threadId && turnId && snapshotItem && shouldSnapshotThreadItem(snapshotItem)) {
+    rememberThreadItemSnapshot(threadId, turnId, snapshotItem);
+  }
   if (message.method === "turn/completed" && threadId) {
     activeTurns.delete(threadId);
   }
@@ -868,6 +878,262 @@ function trackTurn(message) {
       updatedAt: Date.now(),
     });
   }
+}
+
+async function readThreadTokenUsageFallback(threadId) {
+  const threadResult = await rpc.request("thread/read", { threadId, includeTurns: true });
+  const tokenUsage = extractThreadTokenUsage(threadResult?.thread);
+  if (!tokenUsage) return null;
+  return {
+    turnId: tokenUsage.turnId || null,
+    tokenUsage,
+    updatedAt: Date.now(),
+    source: "thread/read",
+  };
+}
+
+function extractThreadTokenUsage(thread) {
+  const candidates = [];
+  collectTokenUsageCandidates(thread, candidates, new Set(), 0);
+  let best = null;
+  for (const candidate of candidates) {
+    const normalized = normalizeTokenUsageCandidate(candidate);
+    if (!normalized) continue;
+    if (!best || normalized.__totalTokens > best.__totalTokens) best = normalized;
+  }
+  if (!best) return null;
+  const { __totalTokens, ...usage } = best;
+  return usage;
+}
+
+function collectTokenUsageCandidates(value, out, seen, depth) {
+  if (!value || typeof value !== "object" || depth > 7 || seen.has(value)) return;
+  seen.add(value);
+  if (looksLikeTokenUsage(value)) out.push(value);
+
+  for (const key of ["tokenUsage", "token_usage", "usage", "usageInfo", "contextUsage"]) {
+    if (value[key]) collectTokenUsageCandidates(value[key], out, seen, depth + 1);
+  }
+
+  for (const key of ["response", "result", "metadata", "meta", "output"]) {
+    if (value[key]) collectTokenUsageCandidates(value[key], out, seen, depth + 1);
+  }
+
+  for (const key of ["turns", "items", "messages", "events", "entries", "history"]) {
+    const child = value[key];
+    if (Array.isArray(child)) {
+      for (const item of child) collectTokenUsageCandidates(item, out, seen, depth + 1);
+    }
+  }
+}
+
+function looksLikeTokenUsage(value) {
+  const total = value?.total || {};
+  return Boolean(
+    value?.totalTokens ||
+      value?.total_tokens ||
+      value?.tokens ||
+      value?.inputTokens ||
+      value?.outputTokens ||
+      value?.reasoningOutputTokens ||
+      value?.input_tokens ||
+      value?.output_tokens ||
+      total?.totalTokens ||
+      total?.tokens ||
+      total?.inputTokens ||
+      total?.outputTokens,
+  );
+}
+
+function normalizeTokenUsageCandidate(candidate) {
+  const usage = candidate?.tokenUsage || candidate?.token_usage || candidate?.usage || candidate;
+  const total = usage?.total || {};
+  const totalTokens = tokenFirstNumber(
+    total?.totalTokens,
+    total?.tokens,
+    total?.total_tokens,
+    usage?.totalTokens,
+    usage?.total_tokens,
+    usage?.tokens,
+  ) || tokenSumNumbers(
+    total?.inputTokens,
+    total?.cachedInputTokens,
+    total?.outputTokens,
+    total?.reasoningOutputTokens,
+    usage?.inputTokens,
+    usage?.cachedInputTokens,
+    usage?.outputTokens,
+    usage?.reasoningOutputTokens,
+    usage?.input_tokens,
+    usage?.cached_input_tokens,
+    usage?.output_tokens,
+    usage?.reasoning_output_tokens,
+  );
+  if (!totalTokens) return null;
+  return {
+    ...usage,
+    total: { ...total, totalTokens },
+    __totalTokens: totalTokens,
+  };
+}
+
+function tokenFirstNumber(...values) {
+  for (const value of values) {
+    const number = tokenNumericValue(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+}
+
+function tokenSumNumbers(...values) {
+  return values.reduce((sum, value) => {
+    const number = tokenNumericValue(value);
+    return Number.isFinite(number) && number > 0 ? sum + number : sum;
+  }, 0);
+}
+
+function tokenNumericValue(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value !== "string") return 0;
+  const trimmed = value.trim();
+  if (!trimmed) return 0;
+  const direct = Number(trimmed);
+  if (Number.isFinite(direct)) return direct;
+  const match = trimmed.toLowerCase().match(/^([0-9]+(?:\.[0-9]+)?)\s*([kmg])?$/);
+  if (!match) return 0;
+  const base = Number(match[1]);
+  const multiplier = match[2] === "g" ? 1_000_000_000 : match[2] === "m" ? 1_000_000 : match[2] === "k" ? 1_000 : 1;
+  return base * multiplier;
+}
+
+function firstItemString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return "";
+}
+
+function stableSnapshotItemId(item) {
+  if (!item || typeof item !== "object") return "";
+  return firstItemString(
+    item.id,
+    item.itemId,
+    item.callId,
+    item.call_id,
+    item.toolCallId,
+    item.tool_call_id,
+    item.requestId,
+    item.responseId,
+    item.result?.id,
+  );
+}
+
+function normalizeSnapshotItem(params, turnId) {
+  const item = params?.item;
+  if (!item || typeof item !== "object") return null;
+  const directId = stableSnapshotItemId(item) || firstItemString(params.itemId);
+  if (directId) return item.id === directId ? item : { ...item, id: directId };
+  const type = String(item.type || item.kind || item.itemType || "item");
+  const natural = firstItemString(
+    item.command,
+    item.commandActions?.[0]?.command,
+    item.path,
+    item.filePath,
+    item.query,
+    item.name,
+    item.title,
+  );
+  const seed = natural || redact(item);
+  const hash = crypto.createHash("sha1").update(`${turnId || ""}:${type}:${seed}`).digest("hex").slice(0, 12);
+  return { ...item, id: `snapshot-${turnId || "turn"}-${type}-${hash}` };
+}
+
+function shouldSnapshotThreadItem(item) {
+  if (!stableSnapshotItemId(item)) return false;
+  const type = String(item.type || item.kind || item.itemType || "").toLowerCase();
+  const role = String(item.role || item.author?.role || "").toLowerCase();
+  if (role === "user" || role === "assistant" || role === "agent") return false;
+  if (type.includes("usermessage") || type.includes("agentmessage")) return false;
+  if (type === "message/user" || type === "message/agent") return false;
+  return true;
+}
+
+function cloneSnapshotItem(item) {
+  try {
+    return JSON.parse(redact(item));
+  } catch {
+    return { id: stableSnapshotItemId(item), type: item.type || item.kind || "tool", status: item.status || null };
+  }
+}
+
+function rememberThreadItemSnapshot(threadId, turnId, item) {
+  const key = String(threadId);
+  let threadSnapshot = threadItemSnapshots.get(key);
+  if (!threadSnapshot) {
+    threadSnapshot = { createdAt: Date.now(), updatedAt: Date.now(), turns: new Map(), itemCount: 0 };
+    threadItemSnapshots.set(key, threadSnapshot);
+  }
+  let turnSnapshot = threadSnapshot.turns.get(String(turnId));
+  if (!turnSnapshot) {
+    turnSnapshot = { id: String(turnId), items: new Map() };
+    threadSnapshot.turns.set(String(turnId), turnSnapshot);
+  }
+  const id = String(stableSnapshotItemId(item));
+  if (!turnSnapshot.items.has(id)) threadSnapshot.itemCount += 1;
+  turnSnapshot.items.set(id, cloneSnapshotItem(item));
+  threadSnapshot.updatedAt = Date.now();
+  trimThreadItemSnapshots();
+}
+
+function trimThreadItemSnapshots() {
+  while (threadItemSnapshots.size > THREAD_ITEM_SNAPSHOT_MAX_THREADS) {
+    let oldest = null;
+    let oldestUpdatedAt = Infinity;
+    for (const [threadId, snapshot] of threadItemSnapshots.entries()) {
+      if (snapshot.updatedAt >= oldestUpdatedAt) continue;
+      oldest = threadId;
+      oldestUpdatedAt = snapshot.updatedAt;
+    }
+    if (!oldest) break;
+    threadItemSnapshots.delete(oldest);
+  }
+  for (const [threadId, snapshot] of threadItemSnapshots.entries()) {
+    while (snapshot.itemCount > THREAD_ITEM_SNAPSHOT_MAX_ITEMS_PER_THREAD) {
+      const firstTurn = snapshot.turns.values().next().value;
+      if (!firstTurn) break;
+      const firstItemId = firstTurn.items.keys().next().value;
+      if (!firstItemId) {
+        snapshot.turns.delete(firstTurn.id);
+        continue;
+      }
+      firstTurn.items.delete(firstItemId);
+      snapshot.itemCount -= 1;
+      if (!firstTurn.items.size) snapshot.turns.delete(firstTurn.id);
+    }
+    if (!snapshot.turns.size) threadItemSnapshots.delete(threadId);
+  }
+}
+
+function mergeThreadItemSnapshots(thread, threadId) {
+  const snapshot = threadItemSnapshots.get(String(threadId));
+  if (!snapshot || !thread) return thread;
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  const turnsById = new Map(turns.filter((turn) => turn?.id).map((turn) => [String(turn.id), turn]));
+  for (const [turnId, turnSnapshot] of snapshot.turns.entries()) {
+    const savedItems = [...turnSnapshot.items.values()].filter(shouldSnapshotThreadItem);
+    if (!savedItems.length) continue;
+    const turn = turnsById.get(turnId);
+    if (!turn) {
+      turns.push({ id: turnId, items: savedItems });
+      continue;
+    }
+    const existingIds = new Set((turn.items || []).map(stableSnapshotItemId).filter(Boolean).map(String));
+    const missingItems = savedItems.filter((item) => !existingIds.has(String(stableSnapshotItemId(item))));
+    if (missingItems.length) turn.items = [...(turn.items || []), ...missingItems];
+  }
+  thread.turns = turns;
+  return thread;
 }
 
 function rememberEventLookup(map, key, value) {
@@ -978,14 +1244,16 @@ async function readJson(req, options = {}) {
 async function saveUploads(files) {
   if (!Array.isArray(files)) throw new Error("Invalid upload payload");
   if (files.length > 10) throw new Error("Upload at most 10 files at once");
-  const dir = path.join(UPLOAD_ROOT, `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`);
-  await fs.mkdir(dir, { recursive: true });
   let totalBytes = 0;
-  const saved = [];
-  for (const [index, file] of files.entries()) {
+  const decodedFiles = files.map((file, index) => {
     const payload = decodeUploadData(file.data);
     totalBytes += payload.length;
     if (totalBytes > MAX_UPLOAD_BYTES) throw new Error("Attachments are too large");
+    return { file, index, payload };
+  });
+  const dir = path.join(UPLOAD_ROOT, `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`);
+  await fs.mkdir(dir, { recursive: true });
+  return Promise.all(decodedFiles.map(async ({ file, index, payload }) => {
     const name = sanitizeUploadName(file.name || `attachment-${index + 1}`);
     const diskName = `${String(index + 1).padStart(2, "0")}-${name}`;
     const target = path.join(dir, diskName);
@@ -999,16 +1267,15 @@ async function saveUploads(files) {
         expiresAt: Date.now() + PREVIEW_TTL_MS,
       });
     }
-    saved.push({
+    return {
       id,
       name,
       path: target,
       mime,
       size: payload.length,
       isImage,
-    });
-  }
-  return saved;
+    };
+  }));
 }
 
 async function sendLocalImage(res, { previewId, filePath, cwd }) {
@@ -1134,9 +1401,79 @@ function normalizeMention(mention, allowedRoot) {
   };
 }
 
+async function resolveMentionRoots(cwd) {
+  if (!cwd) return [];
+  const root = path.resolve(String(cwd));
+  const context = await getGitContext(root).catch(() => null);
+  if (context?.ok) return [context.root || root];
+  const nestedRepos = await findNestedGitRepositories(root).catch(() => []);
+  return [root, ...nestedRepos].filter(Boolean).slice(0, MAX_WORKSPACE_GIT_REPOS);
+}
+
+async function listMentionPathFallback(roots, query) {
+  const needle = String(query || "").trim().toLowerCase();
+  const results = [];
+
+  async function walk(root, dir, depth) {
+    if (results.length >= 30) return;
+    let entries = [];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (results.length >= 30) return;
+      if (GIT_SCAN_SKIP_DIRS.has(entry.name)) continue;
+      if (entry.name.startsWith(".") && ![".codex", ".claude", ".agents"].includes(entry.name)) continue;
+      const absolutePath = path.join(dir, entry.name);
+      const relPath = path.relative(root, absolutePath);
+      const haystack = `${entry.name} ${relPath}`.toLowerCase();
+      const match = !needle || haystack.includes(needle);
+      if (match) {
+        results.push({
+          root,
+          path: relPath,
+          absolutePath,
+          name: entry.name,
+          file_name: entry.name,
+          match_type: entry.isDirectory() ? "directory" : "path",
+          score: entry.isDirectory() ? 0 : 1,
+        });
+      }
+      if (entry.isDirectory() && depth < 2 && (needle || depth === 0)) {
+        await walk(root, absolutePath, depth + 1);
+      }
+    }
+  }
+
+  for (const root of roots.slice(0, 8)) {
+    await walk(root, root, 0);
+    if (results.length >= 30) break;
+  }
+  return results;
+}
+
+function mergeMentionFiles(fuzzyFiles, fallbackFiles) {
+  const seen = new Set();
+  const merged = [];
+  for (const file of [...(fuzzyFiles || []), ...(fallbackFiles || [])]) {
+    const root = file.root ? path.resolve(file.root) : "";
+    const relPath = String(file.path || "");
+    if (!root || !relPath) continue;
+    const key = `${root}:${relPath}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(file);
+    if (merged.length >= 30) break;
+  }
+  return merged;
+}
+
 async function searchMentions(cwd, query) {
-  const roots = cwd ? [cwd] : [];
-  const [files, agents, plugins, apps] = await Promise.all([
+  const roots = await resolveMentionRoots(cwd);
+  const [files, agents, plugins, apps, fallbackFiles] = await Promise.all([
     roots.length
       ? rpc.request("fuzzyFileSearch", { query, roots, cancellationToken: null })
         .catch((error) => ({ error: cleanCommandOutput(error.message || error), files: [] }))
@@ -1146,23 +1483,25 @@ async function searchMentions(cwd, query) {
       .catch((error) => ({ error: cleanCommandOutput(error.message || error), marketplaces: [] }))),
     cachedResponse("mention-apps", () => rpc.request("app/list", { limit: 100 })
       .catch((error) => ({ error: cleanCommandOutput(error.message || error), data: [] }))),
+    listMentionPathFallback(roots, query).catch(() => []),
   ]);
+  const mergedFiles = mergeMentionFiles(files.files || [], fallbackFiles);
 
   const normalizedQuery = query.trim().toLowerCase();
   const filterText = (value) => !normalizedQuery || String(value || "").toLowerCase().includes(normalizedQuery);
   const flattenedPlugins = collectPlugins(plugins)
     .filter((plugin) => filterText(`${plugin.name || ""} ${plugin.interface?.displayName || ""} ${plugin.interface?.description || ""}`))
-    .slice(0, 8);
+    .slice(0, 12);
   const summarizedApps = summarizeApps(apps).data
     .filter((app) => filterText(`${app.name || ""} ${app.description || ""}`))
-    .slice(0, 8);
+    .slice(0, 12);
 
   return {
-    files: (files.files || []).slice(0, 12).map((file) => ({
+    files: mergedFiles.slice(0, 30).map((file) => ({
       root: file.root,
       path: file.path,
       absolutePath: path.join(file.root, file.path),
-      name: file.file_name || path.basename(file.path),
+      name: file.file_name || file.name || path.basename(file.path),
       matchType: file.match_type,
       score: file.score,
     })),
@@ -1183,24 +1522,24 @@ async function listLocalAgents(query = "") {
     path.join(codexHome, "agents"),
     path.join(os.homedir(), ".agents", "agents"),
   ];
-  const agents = [];
-  for (const dir of candidates) {
+  const agentFiles = (await Promise.all(candidates.map(async (dir) => {
     const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".toml")) continue;
-      const filePath = path.join(dir, entry.name);
-      const text = await fs.readFile(filePath, "utf8").catch(() => "");
-      const name = extractTomlString(text, "name") || entry.name.replace(/\.toml$/, "");
-      const description = extractTomlString(text, "description") || "";
-      const model = extractTomlString(text, "model") || "";
-      agents.push({ name, description, model, path: filePath });
-    }
-  }
+    return entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".toml"))
+      .map((entry) => ({ entry, filePath: path.join(dir, entry.name) }));
+  }))).flat();
+  const agents = (await Promise.all(agentFiles.map(async ({ entry, filePath }) => {
+    const text = await fs.readFile(filePath, "utf8").catch(() => "");
+    const name = extractTomlString(text, "name") || entry.name.replace(/\.toml$/, "");
+    const description = extractTomlString(text, "description") || "";
+    const model = extractTomlString(text, "model") || "";
+    return { name, description, model, path: filePath };
+  })));
   const normalizedQuery = String(query || "").trim().toLowerCase();
   return agents
     .filter((agent) => !normalizedQuery || `${agent.name} ${agent.description}`.toLowerCase().includes(normalizedQuery))
     .sort((a, b) => a.name.localeCompare(b.name))
-    .slice(0, 12);
+    .slice(0, 20);
 }
 
 function collectPlugins(plugins) {
@@ -1687,18 +2026,16 @@ async function getWorkspaceGitChanges(cwd, baseContext) {
   const repos = await findNestedGitRepositories(cwd);
   if (!repos.length) return null;
 
-  const repositoryResults = [];
-  for (const repoRoot of repos.slice(0, MAX_WORKSPACE_GIT_REPOS)) {
+  const repositoryResults = (await Promise.all(repos.slice(0, MAX_WORKSPACE_GIT_REPOS).map(async (repoRoot) => {
     const context = await getGitContext(repoRoot).catch(() => null);
-    if (!context?.ok) continue;
+    if (!context?.ok) return null;
     const repoPath = path.relative(cwd, repoRoot) || ".";
     const repoChanges = await getSingleRepoGitChanges(repoRoot, context, {
       repoName: path.basename(repoRoot),
       repoPath,
     }).catch(() => null);
-    if (!repoChanges || !repoChanges.summary.filesChanged) continue;
-    repositoryResults.push(repoChanges);
-  }
+    return repoChanges?.summary.filesChanged ? repoChanges : null;
+  }))).filter(Boolean);
 
   const summary = repositoryResults.reduce((acc, repo) => {
     acc.filesChanged += repo.summary.filesChanged || 0;

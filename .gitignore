@@ -9,3 +9,4 @@ coverage/
 dist/
 .playwright-cli/
 codex-mobile*.yaml
+logs/

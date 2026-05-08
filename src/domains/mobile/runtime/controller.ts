@@ -18,6 +18,7 @@ export const state: AnyRecord = {
   selectedProject: null,
   selectedThread: null,
   thread: null,
+  threadLoading: false,
   context: null,
   changes: null,
   changesLoading: false,
@@ -25,6 +26,8 @@ export const state: AnyRecord = {
   branches: null,
   tokenUsage: null,
   skills: [],
+  skillsLoading: false,
+  skillsSeq: 0,
   models: [],
   modelConfig: null,
   selectedModel: localStorage.getItem("codexMobileModel") || "",
@@ -86,9 +89,15 @@ let viewportListenersInstalled = false;
 let initPromise: Promise<void> | null = null;
 let modelsPromise: Promise<void> | null = null;
 let workspaceCacheWriteTimer: number | null = null;
+let hiddenThreadIdsCacheRaw: string | null = null;
+let hiddenThreadIdsCache: Set<string> | null = null;
+let loadThreadsSeq = 0;
+let loadThreadSeq = 0;
+const skillsInFlight = new Map<string, Promise<AnyRecord>>();
 
 const LEGACY_CACHE_CLEANUP_KEY = "codexMobileLegacyCacheCleanup:v2";
 const WORKSPACE_CACHE_KEY = "codexMobileWorkspaceCache:v1";
+const HIDDEN_THREADS_KEY = "codexMobileHiddenThreadIds:v1";
 const WORKSPACE_CACHE_VERSION = 1;
 const WORKSPACE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const WORKSPACE_CACHE_MAX_BYTES = 900_000;
@@ -187,11 +196,12 @@ function hydrateWorkspaceCache() {
       projects.find((project) => project?.cwd && project.cwd === thread?.cwd) ||
       projects[0] ||
       null;
-    state.projects = projects;
+    state.projects = filterHiddenProjects(projects);
     state.selectedProject = selectedProject;
-    state.threads = threads;
-    state.thread = thread;
+    state.threads = filterHiddenThreads(threads);
+    state.thread = thread && !isThreadHidden(thread.id) ? thread : null;
     state.selectedThread = thread || threads.find((candidate) => candidate?.id === cached.activeThreadId) || null;
+    if (state.selectedThread && isThreadHidden(state.selectedThread.id)) state.selectedThread = null;
     state.screen = "workspace";
     state.projectsLoading = false;
     state.threadsLoading = false;
@@ -201,6 +211,59 @@ function hydrateWorkspaceCache() {
     localStorage.removeItem(WORKSPACE_CACHE_KEY);
     return false;
   }
+}
+
+function readHiddenThreadIds(): Set<string> {
+  const raw = localStorage.getItem(HIDDEN_THREADS_KEY) || "[]";
+  if (hiddenThreadIdsCache && hiddenThreadIdsCacheRaw === raw) return hiddenThreadIdsCache;
+  try {
+    const parsed = JSON.parse(raw);
+    hiddenThreadIdsCache = new Set(Array.isArray(parsed) ? parsed.map((id) => String(id || "")).filter(Boolean) : []);
+    hiddenThreadIdsCacheRaw = raw;
+    return hiddenThreadIdsCache;
+  } catch {
+    localStorage.removeItem(HIDDEN_THREADS_KEY);
+    hiddenThreadIdsCache = new Set();
+    hiddenThreadIdsCacheRaw = "[]";
+    return hiddenThreadIdsCache;
+  }
+}
+
+function writeHiddenThreadIds(ids: Set<string>) {
+  const raw = JSON.stringify([...ids]);
+  localStorage.setItem(HIDDEN_THREADS_KEY, raw);
+  hiddenThreadIdsCache = new Set(ids);
+  hiddenThreadIdsCacheRaw = raw;
+}
+
+function addHiddenThreadIds(ids: string[]) {
+  if (!ids.length) return;
+  const hidden = new Set(readHiddenThreadIds());
+  ids.forEach((id) => hidden.add(String(id)));
+  writeHiddenThreadIds(hidden);
+}
+
+function isThreadHidden(threadId): boolean {
+  return Boolean(threadId && readHiddenThreadIds().has(String(threadId)));
+}
+
+function filterHiddenThreads(threads) {
+  if (!Array.isArray(threads) || !threads.length) return [];
+  const hidden = readHiddenThreadIds();
+  if (!hidden.size) return threads;
+  return threads.filter((thread) => !hidden.has(String(thread?.id || "")));
+}
+
+function filterHiddenProjects(projects) {
+  if (!Array.isArray(projects) || !projects.length) return [];
+  const hidden = readHiddenThreadIds();
+  if (!hidden.size) return projects;
+  return projects.map((project) => {
+    const recentThreads = Array.isArray(project?.recentThreads)
+      ? project.recentThreads.filter((thread) => !hidden.has(String(thread?.id || "")))
+      : project?.recentThreads;
+    return { ...project, recentThreads };
+  });
 }
 
 function summarizeThreadForCache(thread) {
@@ -245,6 +308,14 @@ function scheduleWorkspaceCacheWrite() {
     workspaceCacheWriteTimer = null;
     writeWorkspaceCache();
   }, 250);
+}
+
+function persistWorkspaceCacheNow() {
+  if (workspaceCacheWriteTimer) {
+    window.clearTimeout(workspaceCacheWriteTimer);
+    workspaceCacheWriteTimer = null;
+  }
+  writeWorkspaceCache();
 }
 
 function renderCurrentView() {
@@ -387,7 +458,7 @@ async function loadProjects(options: AnyRecord = {}) {
   renderWorkspace();
   try {
     const result = await fetchJson("/api/projects");
-    state.projects = result.projects || [];
+    state.projects = filterHiddenProjects(result.projects || []);
     state.projectsLoading = false;
     connectEvents();
     const selectedProject =
@@ -472,7 +543,13 @@ function rememberActiveThread(cwd, threadId) {
   localStorage.setItem(activeThreadStorageKey(cwd), threadId);
 }
 
+function isCurrentThreadRequest(threadId: string, seq?: number) {
+  if (seq && seq !== loadThreadSeq) return false;
+  return String(state.thread?.id || "") === String(threadId || "");
+}
+
 async function loadThreads(project, options: AnyRecord = {}) {
+  const seq = ++loadThreadsSeq;
   const sameProject = state.selectedProject?.cwd === project.cwd;
   state.selectedProject = project;
   state.screen = "workspace";
@@ -482,10 +559,12 @@ async function loadThreads(project, options: AnyRecord = {}) {
     state.thread = null;
     state.selectedThread = null;
   }
+  void loadSkills(project.cwd, { force: true, silent: true }).catch(() => {});
   renderWorkspace();
   const query = new URLSearchParams({ cwd: project.cwd, limit: "100" });
   const result = await fetchJson(`/api/threads?${query.toString()}`);
-  state.threads = result.data || [];
+  if (seq !== loadThreadsSeq || state.selectedProject?.cwd !== project.cwd) return;
+  state.threads = filterHiddenThreads(result.data || []);
   state.threadsLoading = false;
   const refreshThread = options.refreshThreadId
     ? state.threads.find((thread) => thread.id === options.refreshThreadId)
@@ -507,10 +586,12 @@ async function loadThreads(project, options: AnyRecord = {}) {
 }
 
 async function loadThread(threadId) {
-    state.changes = null;
-    state.changesLoading = false;
-    state.changesError = "";
-    state.context = null;
+  const seq = ++loadThreadSeq;
+  state.threadLoading = true;
+  state.changes = null;
+  state.changesLoading = false;
+  state.changesError = "";
+  state.context = null;
   state.branches = null;
   state.tokenUsage = null;
   state.skills = [];
@@ -519,12 +600,24 @@ async function loadThread(threadId) {
   state.uploadingAttachments = false;
   state.draftText = "";
   state.screen = "workspace";
-  const [result] = await Promise.all([
-    fetchJson(`/api/threads/${encodeURIComponent(threadId)}`),
-    loadModels(),
-  ]);
-  state.thread = mergePendingLocalTurns(result.thread);
+  renderWorkspace();
+  let result;
+  try {
+    [result] = await Promise.all([
+      fetchJson(`/api/threads/${encodeURIComponent(threadId)}`),
+      loadModels(),
+    ]);
+  } catch (error) {
+    if (seq === loadThreadSeq) {
+      state.threadLoading = false;
+      renderWorkspace();
+    }
+    throw error;
+  }
+  if (seq !== loadThreadSeq) return;
+  state.thread = mergePendingLocalTurns(mergeLiveThreadSnapshot(result.thread));
   state.selectedThread = state.thread;
+  state.threadLoading = false;
   if (result?.latestEventId) state.eventsLastSeenId = String(result.latestEventId);
   rememberActiveThread(state.thread?.cwd || state.selectedProject?.cwd, threadId);
   scheduleWorkspaceCacheWrite();
@@ -534,13 +627,13 @@ async function loadThread(threadId) {
   renderThread();
   if (isThreadBusy()) scheduleThreadRefresh(threadId);
   Promise.allSettled([
-    loadThreadContext(threadId),
-    loadBranches(threadId),
-    loadTokenUsage(threadId),
-    loadSkills(state.thread.cwd),
-    loadChanges(threadId),
+    loadThreadContext(threadId, { seq }),
+    loadBranches(threadId, { seq }),
+    loadTokenUsage(threadId, { seq }),
+    loadSkills(state.thread.cwd, { force: true, silent: true }),
+    loadChanges(threadId, { seq }),
   ]).then(() => {
-    if (state.thread?.id === threadId) renderThread();
+    if (isCurrentThreadRequest(threadId, seq)) renderThread();
   });
 }
 
@@ -565,8 +658,10 @@ async function loadModels() {
   return modelsPromise;
 }
 
-async function loadThreadContext(threadId) {
-  state.context = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/context`);
+async function loadThreadContext(threadId, options: AnyRecord = {}) {
+  const context = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/context`);
+  if (!isCurrentThreadRequest(threadId, options.seq)) return;
+  state.context = context;
 }
 
 async function loadChanges(threadId, options: AnyRecord = {}) {
@@ -576,29 +671,61 @@ async function loadChanges(threadId, options: AnyRecord = {}) {
     renderThread();
   }
   try {
-    state.changes = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/changes`);
+    const changes = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/changes`);
+    if (!isCurrentThreadRequest(threadId, options.seq)) return;
+    state.changes = changes;
     state.changesError = "";
   } catch (error) {
+    if (!isCurrentThreadRequest(threadId, options.seq)) return;
     state.changesError = error.message || "Failed to load changes.";
     throw error;
   } finally {
-    state.changesLoading = false;
+    if (isCurrentThreadRequest(threadId, options.seq)) state.changesLoading = false;
   }
 }
 
-async function loadBranches(threadId) {
-  state.branches = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/branches`);
+async function loadBranches(threadId, options: AnyRecord = {}) {
+  const branches = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/branches`);
+  if (!isCurrentThreadRequest(threadId, options.seq)) return;
+  state.branches = branches;
 }
 
-async function loadTokenUsage(threadId) {
+async function loadTokenUsage(threadId, options: AnyRecord = {}) {
   const result = await fetchJson(`/api/threads/${encodeURIComponent(threadId)}/token-usage`);
+  if (!isCurrentThreadRequest(threadId, options.seq)) return;
   state.tokenUsage = result.tokenUsage || null;
+  emit();
 }
 
-async function loadSkills(cwd) {
-  const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-  const result = await fetchJson(`/api/skills${query}`);
-  state.skills = result.data || [];
+async function loadSkills(cwd, options: AnyRecord = {}) {
+  const seq = Number(state.skillsSeq || 0) + 1;
+  state.skillsSeq = seq;
+  if (!options.silent) {
+    state.skillsLoading = true;
+    renderWorkspace();
+  }
+  const params = new URLSearchParams();
+  if (cwd) params.set("cwd", cwd);
+  if (options.force) params.set("force", "1");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const key = query || "?";
+  let request = skillsInFlight.get(key);
+  if (!request) {
+    request = fetchJson(`/api/skills${query}`).finally(() => {
+      if (skillsInFlight.get(key) === request) skillsInFlight.delete(key);
+    });
+    skillsInFlight.set(key, request);
+  }
+  try {
+    const result = await request;
+    if (state.skillsSeq !== seq) return;
+    state.skills = result.data || [];
+  } finally {
+    if (state.skillsSeq === seq) {
+      state.skillsLoading = false;
+      emit();
+    }
+  }
 }
 
 async function sendMessage(text, attachmentsOverride = null, mentionsOverride = null) {
@@ -759,24 +886,150 @@ function dropMatchingLocalTurn(serverText: string) {
   }
 }
 
+function firstItemString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return "";
+}
+
+function stableItemId(item: AnyRecord | null | undefined): string {
+  if (!item || typeof item !== "object") return "";
+  return firstItemString(
+    item.id,
+    item.itemId,
+    item.callId,
+    item.call_id,
+    item.toolCallId,
+    item.tool_call_id,
+    item.requestId,
+    item.responseId,
+    item.result?.id,
+  );
+}
+
+function eventItemId(event, item: AnyRecord | null | undefined, turn) {
+  const params = event?.params || {};
+  const direct = stableItemId(item) || firstItemString(params.itemId, params.item?.id);
+  if (direct) return direct;
+  const type = String(item?.type || item?.kind || item?.itemType || "item");
+  const natural = firstItemString(
+    item?.command,
+    item?.commandActions?.[0]?.command,
+    item?.path,
+    item?.filePath,
+    item?.query,
+    item?.name,
+    item?.title,
+  );
+  if (natural) return `live-${params.turnId || "turn"}-${type}-${natural}`;
+  const index = Array.isArray(turn?.items) ? turn.items.length : 0;
+  return `live-${params.turnId || "turn"}-${type}-${index}`;
+}
+
+function normalizeEventItem(event, turn) {
+  const item = event?.params?.item;
+  if (!item || typeof item !== "object") return item;
+  const id = eventItemId(event, item, turn);
+  const next = item.id === id ? item : { ...item, id };
+  if (!next.startedAt && event.method === "item/started") next.startedAt = Date.now();
+  if (!next.completedAt && event.method === "item/completed") next.completedAt = Date.now();
+  return next;
+}
+
+function isSnapshotPreservedItem(item: AnyRecord | null | undefined): boolean {
+  if (!stableItemId(item)) return false;
+  const type = item?.type || item?.kind;
+  if (isUserMessageType(type) || isAgentMessageType(type)) return false;
+  return true;
+}
+
+function mergeTurnItemsPreservingLiveOrder(nextTurn, currentTurn) {
+  const nextItems = Array.isArray(nextTurn?.items) ? nextTurn.items : [];
+  const currentItems = Array.isArray(currentTurn?.items) ? currentTurn.items : [];
+  if (!nextItems.length || !currentItems.length) return;
+
+  const nextById = new Map();
+  for (const item of nextItems) {
+    const id = stableItemId(item);
+    if (id) nextById.set(id, item);
+  }
+  const merged = [];
+  const included = new Set();
+  for (const nextItem of nextItems) {
+    const id = stableItemId(nextItem);
+    if (!isUserMessageType(nextItem?.type || nextItem?.kind)) continue;
+    merged.push(nextItem);
+    if (id) included.add(id);
+  }
+  for (const currentItem of currentItems) {
+    const id = stableItemId(currentItem);
+    if (id && included.has(id)) continue;
+    if (id && nextById.has(id)) {
+      merged.push(nextById.get(id));
+      included.add(id);
+      continue;
+    }
+    if (isSnapshotPreservedItem(currentItem)) {
+      merged.push(currentItem);
+      if (id) included.add(id);
+    }
+  }
+  for (const nextItem of nextItems) {
+    const id = stableItemId(nextItem);
+    if (id && included.has(id)) continue;
+    merged.push(nextItem);
+    if (id) included.add(id);
+  }
+  nextTurn.items = merged;
+}
+
 function mergeLiveThreadSnapshot(nextThread) {
   if (!nextThread || state.thread?.id !== nextThread.id) return nextThread;
   const currentItemsById = new Map();
+  const currentTurnsById = new Map();
   for (const turn of state.thread.turns || []) {
+    if (turn?.id) currentTurnsById.set(turn.id, turn);
     for (const item of turn?.items || []) {
-      if (item?.id) currentItemsById.set(item.id, item);
+      const id = stableItemId(item);
+      if (id) currentItemsById.set(id, item);
     }
   }
+  const nextTurnsById = new Map();
+  const nextItemIdsByTurn = new Map();
   for (const turn of nextThread.turns || []) {
+    if (turn?.id) nextTurnsById.set(turn.id, turn);
+    const itemIds = new Set();
     for (const item of turn?.items || []) {
-      if (!item?.id || !isAgentMessageType(item?.type || item?.kind)) continue;
-      const current = currentItemsById.get(item.id);
+      const itemId = stableItemId(item);
+      if (itemId) itemIds.add(itemId);
+      if (!itemId || !isAgentMessageType(item?.type || item?.kind)) continue;
+      const current = currentItemsById.get(itemId);
       const currentText = extractText(current);
       const nextText = extractText(item);
       if (currentText && currentText.length > nextText.length && currentText.startsWith(nextText)) {
         item.text = currentText;
       }
     }
+    const currentTurn = turn?.id ? currentTurnsById.get(turn.id) : null;
+    if (currentTurn) mergeTurnItemsPreservingLiveOrder(turn, currentTurn);
+    if (turn?.id) {
+      const mergedIds = new Set((turn.items || []).map(stableItemId).filter(Boolean));
+      nextItemIdsByTurn.set(turn.id, mergedIds.size ? mergedIds : itemIds);
+    }
+  }
+  for (const [turnId, currentTurn] of currentTurnsById.entries()) {
+    const preservedItems = (currentTurn.items || []).filter(isSnapshotPreservedItem);
+    if (!preservedItems.length) continue;
+    const nextTurn = nextTurnsById.get(turnId);
+    if (!nextTurn) {
+      nextThread.turns = [...(nextThread.turns || []), { ...currentTurn, items: preservedItems }];
+      continue;
+    }
+    const itemIds = nextItemIdsByTurn.get(turnId) || new Set();
+    const missing = preservedItems.filter((item) => !itemIds.has(stableItemId(item)));
+    if (missing.length) nextTurn.items = [...(nextTurn.items || []), ...missing];
   }
   return nextThread;
 }
@@ -837,6 +1090,57 @@ async function runThreadAction(action) {
   if (nextThread?.id) await loadThread(nextThread.id);
   else if (action === "archive") await loadThreads(state.selectedProject);
   else await loadThread(state.thread.id);
+}
+
+async function archiveThreads(threadIds: Array<string | number>, options: { confirm?: boolean } = {}) {
+  const ids: string[] = Array.from(new Set((threadIds || []).map((id) => String(id || "")).filter(Boolean)));
+  if (!ids.length) return null;
+  const threadsById = new Map<string, AnyRecord>(state.threads.map((thread: AnyRecord) => [String(thread.id), thread]));
+  if (options.confirm !== false) {
+    const thread = threadsById.get(ids[0]);
+    const label = ids.length === 1
+      ? `"${thread?.name || thread?.title || thread?.preview || "this session"}"`
+      : `${ids.length} sessions`;
+    if (!confirm(`Remove ${label} from Recents?`)) return null;
+  }
+  const results = await Promise.allSettled(ids.map((threadId) => fetchJson(`/api/threads/${encodeURIComponent(threadId)}/actions`, {
+    method: "POST",
+    body: { action: "archive" },
+  })));
+  const archivedIds = ids.filter((_, index) => results[index].status === "fulfilled");
+  const failedIds = ids.filter((_, index) => results[index].status === "rejected");
+  if (!archivedIds.length) {
+    const reason = results.find((result) => result.status === "rejected")?.reason;
+    if (reason) throw reason;
+    return { archivedIds, failedIds };
+  }
+  const archivedSet = new Set(archivedIds);
+  addHiddenThreadIds(archivedIds);
+  state.threads = state.threads.filter((candidate) => !archivedSet.has(String(candidate.id || "")));
+  const archivedCurrent = archivedSet.has(String(state.thread?.id || ""));
+  if (failedIds.length) alert(`${failedIds.length}개 세션은 버리지 못했습니다.`);
+  if (!archivedCurrent) {
+    persistWorkspaceCacheNow();
+    renderWorkspace();
+    return { archivedIds, failedIds };
+  }
+  state.thread = null;
+  state.selectedThread = null;
+  state.context = null;
+  state.changes = null;
+  state.branches = null;
+  state.tokenUsage = null;
+  state.activeTab = "chat";
+  localStorage.removeItem(activeThreadStorageKey(state.selectedProject?.cwd));
+  persistWorkspaceCacheNow();
+  const nextThread = state.threads[0];
+  if (nextThread?.id) await loadThread(nextThread.id);
+  else renderWorkspace();
+  return { archivedIds, failedIds };
+}
+
+async function archiveThread(threadId) {
+  return archiveThreads([threadId]);
 }
 
 async function checkoutBranch(branch, create = false) {
@@ -1141,19 +1445,21 @@ function applyCodexEvent(event) {
 
   if (event.method === "turn/started") {
     const turn = event.params.turn || { id: event.params.turnId, items: [], status: "running" };
+    turn.startedAt ||= Date.now();
     if (!turns.some((candidate) => candidate?.id === turn.id)) turns.push(turn);
   }
 
   if (event.method === "item/started" || event.method === "item/completed") {
     let turn = turns.find((candidate) => candidate?.id === event.params.turnId);
     if (!turn) {
-      turn = { id: event.params.turnId, items: [], status: "running" };
+      turn = { id: event.params.turnId, items: [], status: "running", startedAt: Date.now() };
       turns.push(turn);
     }
     if (turn) {
       turn.items ||= [];
-      const item = event.params.item;
-      const index = turn.items.findIndex((candidate) => candidate?.id === item?.id);
+      const item = normalizeEventItem(event, turn);
+      const itemId = stableItemId(item);
+      const index = turn.items.findIndex((candidate) => stableItemId(candidate) === itemId);
       if (index >= 0) turn.items[index] = item;
       else turn.items.push(item);
       // Dedupe: when a server userMessage arrives that matches a pending optimistic
@@ -1168,7 +1474,7 @@ function applyCodexEvent(event) {
   if (event.method === "item/agentMessage/delta") {
     let turn = turns.find((candidate) => candidate?.id === event.params.turnId);
     if (!turn) {
-      turn = { id: event.params.turnId, items: [], status: "running" };
+      turn = { id: event.params.turnId, items: [], status: "running", startedAt: Date.now() };
       turns.push(turn);
     }
     if (turn) {
@@ -1185,11 +1491,18 @@ function applyCodexEvent(event) {
   if (event.method === "turn/completed") {
     if (!state.thread || state.thread.id !== event.params?.threadId) return;
     const turn = turns.find((candidate) => candidate?.id === event.params.turnId);
-    if (turn) turn.status = event.params.turn?.status || "completed";
+    if (turn) {
+      Object.assign(turn, event.params.turn || {});
+      turn.status = event.params.turn?.status || "completed";
+      turn.completedAt ||= Date.now();
+    }
+    state.thread.status = event.params.thread?.status || state.thread.status || "completed";
     state.pendingLocalTurns = state.pendingLocalTurns.filter((candidate) => candidate.threadId !== state.thread.id);
     stopThreadRefresh();
     notifyTurnCompleted(event);
-    loadChanges(state.thread.id).then(() => renderThread()).catch(() => {});
+    const threadId = state.thread.id;
+    setTimeout(() => refreshThreadSnapshot(threadId).catch(() => {}), 250);
+    loadChanges(threadId).then(() => renderThread()).catch(() => {});
     setTimeout(() => flushMessageQueue({ force: true }), 250);
     immediateRender = true;
   }
@@ -2322,11 +2635,22 @@ function slashCommands() {
     { name: "fork", description: "현재 thread를 새 thread로 fork합니다.", action: "fork" },
     { name: "model", description: "모델과 reasoning 선택 메뉴를 엽니다.", action: "model" },
     { name: "reasoning", description: "reasoning effort 선택 메뉴를 엽니다.", action: "model" },
+    { name: "permissions", description: "권한 정책 선택 메뉴를 엽니다.", action: "permissions" },
     { name: "status", description: "계정, 모델, MCP, skill 상태를 엽니다.", action: "settings" },
     { name: "changes", description: "현재 변경 파일을 확인합니다.", action: "changes" },
+    { name: "diff", description: "현재 변경 diff를 확인합니다.", action: "changes" },
+    { name: "review", description: "변경 사항 검토 화면을 엽니다.", action: "changes" },
+    { name: "refresh", description: "현재 thread snapshot과 실시간 연결을 다시 동기화합니다.", action: "refresh" },
+    { name: "context", description: "현재 context 사용량을 다시 측정합니다.", action: "context" },
+    { name: "archive", description: "현재 thread를 Recents에서 제거합니다.", action: "archive" },
     { name: "new", description: "현재 프로젝트에서 새 채팅을 시작합니다.", action: "new" },
+    { name: "settings", description: "모바일 Codex 상태와 설정을 엽니다.", action: "settings" },
     { name: "skills", description: "설치된 skill을 확인합니다.", action: "settings" },
+    { name: "prompts", description: "사용 가능한 prompt/agent 구성을 확인합니다.", action: "settings" },
+    { name: "agents", description: "로컬 agent 구성을 확인합니다.", action: "settings" },
     { name: "mcp", description: "MCP 서버 상태를 확인합니다.", action: "settings" },
+    { name: "plugins", description: "설치된 plugin 상태를 확인합니다.", action: "settings" },
+    { name: "apps", description: "연결된 app 상태를 확인합니다.", action: "settings" },
   ];
 }
 
@@ -2343,8 +2667,25 @@ function runSlashCommand(input, token, name) {
     renderThread();
     return;
   }
+  if (command.action === "permissions") {
+    state.openComposerMenu = "permissions";
+    renderThread();
+    return;
+  }
   if (command.action === "settings") {
     loadSettings().catch((error) => alert(error.message));
+    return;
+  }
+  if (command.action === "refresh") {
+    if (state.thread) refreshRealtime().catch((error) => alert(error.message));
+    return;
+  }
+  if (command.action === "context") {
+    if (state.thread) loadTokenUsage(state.thread.id).then(() => renderThread()).catch((error) => alert(error.message));
+    return;
+  }
+  if (command.action === "archive") {
+    if (state.thread) archiveThread(state.thread.id).catch((error) => alert(error.message));
     return;
   }
   if (command.action === "changes") {
@@ -2699,15 +3040,170 @@ function toolTitle(type) {
 function toolSummary(type, item) {
   if (type === "commandExecution") return summarizeCommand(item.command || item.commandActions?.[0]?.command || item.argv?.join?.(" "));
   if (type === "webSearch") return item.query || item.action?.url || "검색 작업";
-  if (type === "fileChange") return item.path || item.filePath || item.name || "파일 변경";
+  if (type === "fileChange") return summarizeFileChange(item);
   return item.name || item.title || item.id || "작업 세부 정보";
 }
 
 function toolPreview(type, item) {
   if (type === "commandExecution") return item.command || item.commandActions?.[0]?.command || "";
   if (type === "webSearch") return item.action?.url || item.query || "";
-  if (type === "fileChange") return item.diff || item.path || item.filePath || "";
+  if (type === "fileChange") return previewFileChange(item);
   return "";
+}
+
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return "";
+}
+
+function directFilePath(value) {
+  if (!value || typeof value !== "object") return "";
+  return firstNonEmptyString(
+    value.path,
+    value.filePath,
+    value.file_path,
+    value.relativePath,
+    value.relative_path,
+    value.filename,
+    value.fileName,
+    value.name,
+    value.targetPath,
+    value.target_path,
+    value.sourcePath,
+    value.source_path,
+    value.file?.path,
+    value.file?.filePath,
+    value.target?.path,
+    value.source?.path,
+    value.result?.path,
+    value.result?.filePath,
+    value.action?.path,
+    value.input?.path,
+  );
+}
+
+function directChangeKind(value) {
+  if (!value || typeof value !== "object") return "";
+  return firstNonEmptyString(
+    value.status,
+    value.kind,
+    value.operation,
+    value.op,
+    value.action,
+    value.changeType,
+    value.change_type,
+    value.type === "fileChange" ? "" : value.type,
+  );
+}
+
+function collectFileChangeEntries(item) {
+  const entries = [];
+  const candidates = [
+    item?.changes,
+    item?.fileChanges,
+    item?.files,
+    item?.edits,
+    item?.operations,
+    item?.actions,
+    item?.result?.changes,
+    item?.result?.fileChanges,
+    item?.result?.files,
+    item?.result?.edits,
+    item?.input?.changes,
+    item?.input?.files,
+    item?.args?.changes,
+    item?.args?.files,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) entries.push(...candidate.filter((entry) => entry && typeof entry === "object"));
+  }
+  return entries.length ? entries : (item && typeof item === "object" ? [item] : []);
+}
+
+function directDiff(value) {
+  if (!value || typeof value !== "object") return "";
+  return firstNonEmptyString(
+    value.diff,
+    value.patch,
+    value.unifiedDiff,
+    value.unified_diff,
+    value.content,
+    value.text,
+    value.result?.diff,
+    value.result?.patch,
+    value.result?.unifiedDiff,
+    value.result?.unified_diff,
+    value.action?.diff,
+    value.action?.patch,
+    value.input?.diff,
+    value.input?.patch,
+  );
+}
+
+function findNestedStringByKey(value, keyPattern, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 4) return "";
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = findNestedStringByKey(entry, keyPattern, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child === "string" && keyPattern.test(key) && child.trim()) return child.trim();
+    if (child && typeof child === "object") {
+      const found = findNestedStringByKey(child, keyPattern, depth + 1);
+      if (found) return found;
+    }
+  }
+  return "";
+}
+
+function summarizeFileChange(item) {
+  const entries = collectFileChangeEntries(item);
+  const paths = entries
+    .map(directFilePath)
+    .filter(Boolean);
+  if (paths.length === 1) {
+    const kind = directChangeKind(entries[0]);
+    return kind ? `${paths[0]} · ${kind}` : paths[0];
+  }
+  if (paths.length > 1) {
+    const visible = paths.slice(0, 2).join(", ");
+    const suffix = paths.length > 2 ? ` 외 ${paths.length - 2}개` : "";
+    return `${visible}${suffix}`;
+  }
+  const fallbackPath = directFilePath(item);
+  if (fallbackPath) return fallbackPath;
+  return "파일 변경";
+}
+
+function previewFileChange(item) {
+  const entries = collectFileChangeEntries(item);
+  const sections = [];
+  for (const entry of entries) {
+    const path = directFilePath(entry);
+    const kind = directChangeKind(entry);
+    const diff = directDiff(entry) || findNestedStringByKey(entry, /^(diff|patch|unifiedDiff|unified_diff)$/i);
+    if (path || kind || diff) {
+      const header = [path, kind].filter(Boolean).join(" · ");
+      sections.push([header, diff].filter(Boolean).join("\n"));
+    }
+  }
+  if (sections.length) return sections.join("\n\n");
+  const direct = directDiff(item) || findNestedStringByKey(item, /^(diff|patch|unifiedDiff|unified_diff)$/i);
+  if (direct) return direct;
+  const path = summarizeFileChange(item);
+  if (path && path !== "파일 변경") return path;
+  try {
+    const json = JSON.stringify(item, null, 2);
+    return json === "{}" ? "" : json;
+  } catch {
+    return "";
+  }
 }
 
 function summarizeCommand(command) {
@@ -2977,16 +3473,20 @@ function renderAttachmentPreviews(attachments = []) {
 }
 
 function parseMentionedFilesText(text) {
-  if (!String(text || "").startsWith("# Files mentioned by the user:")) return null;
-  const marker = "## My request for Codex:";
-  const index = text.indexOf(marker);
-  if (index < 0) return null;
-  const filesBlock = text.slice(0, index);
-  const body = text.slice(index + marker.length).trim();
+  const source = String(text || "").replace(/\r\n/g, "\n").trimStart();
+  const filesHeading = source.match(/^#{1,3}\s+Files mentioned by the user:\s*$/im);
+  const browserHeading = source.match(/^#{1,3}\s+In app browser:\s*$/im);
+  const requestHeading = source.match(/^#{1,3}\s+My request for Codex:\s*$/im);
+  if (!requestHeading || requestHeading.index == null) return null;
+  const hasFilesContext = filesHeading?.index != null && filesHeading.index < requestHeading.index;
+  const hasBrowserContext = browserHeading?.index != null && browserHeading.index < requestHeading.index;
+  if (!hasFilesContext && !hasBrowserContext) return null;
+  const filesBlock = hasFilesContext ? source.slice(filesHeading.index, requestHeading.index) : "";
+  const body = source.slice(requestHeading.index + requestHeading[0].length).trim();
   const lines = filesBlock.split("\n");
   const attachments = [];
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const match = lines[lineIndex].match(/^##\s+(.+?):\s*$/);
+    const match = lines[lineIndex].match(/^#{2,4}\s+(.+?):\s*$/);
     if (!match) continue;
     const filePath = lines.slice(lineIndex + 1).find((line) => line.trim().startsWith("/"))?.trim();
     if (!filePath) continue;
@@ -3274,6 +3774,40 @@ function textFromValue(value) {
   return "";
 }
 
+function timestampMs(value) {
+  if (!value) return 0;
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return timestampMs(numeric);
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return value > 1_000_000_000_000 ? value : value * 1000;
+}
+
+function turnDurationMs(turn) {
+  const startedAt = timestampMs(turn?.startedAt || turn?.started_at || turn?.createdAt || turn?.created_at);
+  const completedAt = timestampMs(turn?.completedAt || turn?.completed_at || turn?.finishedAt || turn?.finished_at);
+  if (!startedAt || !completedAt || completedAt < startedAt) return 0;
+  return completedAt - startedAt;
+}
+
+function formatDuration(milliseconds) {
+  const ms = Number(milliseconds || 0);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 10) return `${seconds.toFixed(1)}초`;
+  if (seconds < 60) return `${Math.round(seconds)}초`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  if (minutes < 60) return remainingSeconds ? `${minutes}분 ${remainingSeconds}초` : `${minutes}분`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes ? `${hours}시간 ${remainingMinutes}분` : `${hours}시간`;
+}
+
 function formatDate(seconds) {
   if (!seconds) return "";
   return new Intl.DateTimeFormat("ko", { dateStyle: "short", timeStyle: "short" }).format(new Date(seconds * 1000));
@@ -3354,6 +3888,8 @@ export const mobileController = {
   sendMessage,
   interruptThread,
   runThreadAction,
+  archiveThread,
+  archiveThreads,
   checkoutBranch,
   commitChanges,
   enableNotifications,
@@ -3370,6 +3906,8 @@ export const mobileController = {
 export const mobileSelectors = {
   formatDate,
   formatClock,
+  formatDuration,
+  turnDurationMs,
   formatCompactNumber,
   formatThreadStatus,
   formatThreadListLabel,
