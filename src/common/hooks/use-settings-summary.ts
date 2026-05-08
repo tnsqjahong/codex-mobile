@@ -1,5 +1,7 @@
 import { useMemo } from "react"
 
+import { formatModelLabel, modelDisplayName, modelValue } from "@/common/lib/model-label"
+
 export interface SettingsSummaryView {
   account: { primaryLabel: string; planLabel: string | null; loggedIn: boolean }
   usage: {
@@ -60,10 +62,11 @@ function pickUsageSummary(settings: Record<string, any>): SettingsSummaryView["u
     normalizeUsageWindow("primary", "5h 세션", root?.primary),
     normalizeUsageWindow("secondary", "주간", root?.secondary),
   ].filter((entry) => entry.usedPercent !== null || entry.resetsAt)
-  const nextResetMs = windows
-    .map((entry) => entry.resetsAtMs)
-    .filter((value): value is number => value !== null)
-    .sort((a, b) => a - b)[0]
+  let nextResetMs: number | null = null
+  for (const { resetsAtMs } of windows) {
+    if (resetsAtMs === null) continue
+    if (nextResetMs === null || resetsAtMs < nextResetMs) nextResetMs = resetsAtMs
+  }
 
   return {
     windows: windows.map(({ resetsAtMs, ...entry }) => entry),
@@ -117,13 +120,9 @@ function labelForWindow(windowDurationMins: unknown): string | null {
   return `${mins}분`
 }
 
-function modelValue(model: any): string {
-  return model?.model || model?.id || ""
-}
-
 function displayModelName(state: Record<string, any>, value: string): string {
   const model = (state.models || []).find((item: any) => modelValue(item) === value)
-  return model?.displayName || value || "default"
+  return model ? modelDisplayName(model, value) : formatModelLabel(value || "default")
 }
 
 function pickRuntimeSummary(state: Record<string, any>): SettingsSummaryView["runtime"] {
@@ -148,32 +147,53 @@ function pickRuntimeSummary(state: Record<string, any>): SettingsSummaryView["ru
 }
 
 function collectPlugins(plugins: any): string[] {
-  return (plugins?.marketplaces || [])
-    .flatMap((market: any) => market.plugins || [])
-    .map((plugin: any) => plugin.interface?.displayName || plugin.name)
-    .filter(Boolean)
+  const result: string[] = []
+  for (const market of plugins?.marketplaces || []) {
+    for (const plugin of market.plugins || []) {
+      const label = plugin.interface?.displayName || plugin.name
+      if (label) result.push(label)
+    }
+  }
+  return result
 }
 
 function collectSkills(skills: any): string[] {
-  return (skills?.data || [])
-    .flatMap((entry: any) => entry.skills || [])
-    .map((skill: any) => skill.name || skill.metadata?.name)
-    .filter(Boolean)
+  const result: string[] = []
+  for (const entry of skills?.data || []) {
+    for (const skill of entry.skills || []) {
+      const label = skill.name || skill.metadata?.name
+      if (label) result.push(label)
+    }
+  }
+  return result
 }
 
 function collectApps(apps: any): string[] {
-  return (apps?.data || []).map((item: any) => item.name || item.id).filter(Boolean)
+  const result: string[] = []
+  for (const item of apps?.data || []) {
+    const label = item.name || item.id
+    if (label) result.push(label)
+  }
+  return result
 }
 
 function collectMcpServers(mcp: any): string[] {
   const list = mcp?.mcpServers || mcp?.data || []
-  return list.map((item: any) => item.name || item.id || item.serverName).filter(Boolean)
+  const result: string[] = []
+  for (const item of list) {
+    const label = item.name || item.id || item.serverName
+    if (label) result.push(label)
+  }
+  return result
 }
 
 function collectAutomations(automations: any): string[] {
-  return (automations?.data || [])
-    .map((item: any) => `${item.name}${item.status ? ` · ${item.status}` : ""}`)
-    .filter(Boolean)
+  const result: string[] = []
+  for (const item of automations?.data || []) {
+    if (!item.name) continue
+    result.push(`${item.name}${item.status ? ` · ${item.status}` : ""}`)
+  }
+  return result
 }
 
 export function useSettingsSummary(state: Record<string, any>): SettingsSummaryView {

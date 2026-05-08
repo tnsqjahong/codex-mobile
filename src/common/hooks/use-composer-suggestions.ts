@@ -115,7 +115,7 @@ function buildMentionItems(result: MentionsResult): SuggestionItem[] {
       name,
     })
   }
-  return out.slice(0, 18)
+  return out.slice(0, 30)
 }
 
 function dispatchSlash(
@@ -129,6 +129,26 @@ function dispatchSlash(
   }
   if (command.action === "settings") {
     void mobileController.loadSettings()
+    return
+  }
+  if (command.action === "model") {
+    patchState({ openComposerMenu: "model" })
+    return
+  }
+  if (command.action === "permissions") {
+    patchState({ openComposerMenu: "permissions" })
+    return
+  }
+  if (command.action === "context") {
+    if (threadId) void mobileController.loadTokenUsage(threadId)
+    return
+  }
+  if (command.action === "refresh") {
+    if (hasThread) void mobileController.refreshRealtime()
+    return
+  }
+  if (command.action === "archive") {
+    if (threadId) void mobileController.archiveThread(threadId)
     return
   }
   if (command.action === "changes") {

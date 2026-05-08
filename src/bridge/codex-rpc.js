@@ -16,24 +16,28 @@ export class CodexRpc extends EventEmitter {
   async start() {
     if (this.readyPromise) return this.readyPromise;
 
-    this.proc = spawn(this.codexBin, ["app-server"], {
+    const proc = spawn(this.codexBin, ["app-server"], {
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
     });
+    this.proc = proc;
 
-    this.proc.on("exit", (code, signal) => {
+    proc.on("error", (error) => {
+      this.#handleProcessFailure(error);
+    });
+
+    proc.on("exit", (code, signal) => {
       const error = new Error(`codex app-server exited (${code ?? signal})`);
-      for (const { reject } of this.pending.values()) reject(error);
-      this.pending.clear();
+      this.#handleProcessFailure(error);
       this.emit("exit", { code, signal });
     });
 
-    this.proc.stderr.on("data", (chunk) => {
+    proc.stderr.on("data", (chunk) => {
       const text = chunk.toString();
       if (text.trim()) this.emit("stderr", text);
     });
 
-    createInterface({ input: this.proc.stdout }).on("line", (line) => {
+    createInterface({ input: proc.stdout }).on("line", (line) => {
       if (!line.trim()) return;
       let message;
       try {
@@ -86,7 +90,13 @@ export class CodexRpc extends EventEmitter {
         },
       });
 
-      this.#send(message);
+      try {
+        this.#send(message);
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timeout);
+        reject(error);
+      }
     });
   }
 
@@ -104,10 +114,21 @@ export class CodexRpc extends EventEmitter {
 
   stop() {
     if (this.proc && !this.proc.killed) this.proc.kill();
+    this.proc = null;
+    this.readyPromise = null;
   }
 
   #send(message) {
+    if (!this.proc?.stdin?.writable) throw new Error("codex app-server is not running");
     this.proc.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  #handleProcessFailure(error) {
+    for (const { reject } of this.pending.values()) reject(error);
+    this.pending.clear();
+    this.serverRequests.clear();
+    this.proc = null;
+    this.readyPromise = null;
   }
 
   #handleMessage(message) {

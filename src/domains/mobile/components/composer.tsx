@@ -1,4 +1,4 @@
-import { useRef } from "react"
+import { memo, useCallback, useMemo, useRef, type CSSProperties } from "react"
 import { Brain, Paperclip, Send, Shield, Square, X } from "lucide-react"
 
 import { Button } from "@/common/ui/button"
@@ -23,8 +23,61 @@ import { cn } from "@/common/lib/utils"
 import { useComposer } from "@/common/hooks/use-composer"
 import { useComposerSuggestions } from "@/common/hooks/use-composer-suggestions"
 import { ComposerSuggestions } from "@/domains/mobile/components/composer-suggestions"
+import { patchState } from "@/domains/mobile/runtime/controller"
 
 const EMPTY_ARRAY: readonly any[] = []
+
+function ContextDialImpl({ dial }: { dial: ReturnType<typeof useComposer>["tokenDial"] }) {
+  const angle = dial.hasUsage && dial.contextWindow ? dial.percent * 3.6 : 0
+  const style = useMemo(() => ({ "--ctx-angle": `${angle}deg` }) as CSSProperties, [angle])
+  return (
+    <span
+      className={cn("codex-context-dial", !dial.hasUsage && "codex-context-dial-empty")}
+      style={style}
+      title={dial.title}
+      aria-label={dial.hasUsage ? `Context usage ${dial.percent}%` : "Context usage unavailable"}
+      role="meter"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={dial.hasUsage ? dial.percent : undefined}
+    />
+  )
+}
+
+const ContextDial = memo(ContextDialImpl)
+
+function AttachmentChipImpl({
+  attachment,
+  onRemove,
+}: {
+  attachment: any
+  onRemove: (id: any) => void
+}) {
+  const remove = useCallback(() => {
+    onRemove(attachment.id)
+  }, [attachment.id, onRemove])
+
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border border-[var(--hairline)] bg-[var(--canvas-soft)] px-2 py-0.5 text-[11.5px] text-[var(--ink)]"
+    >
+      {attachment.name}
+      <button
+        type="button"
+        aria-label="Remove attachment"
+        className="ml-0.5 inline-flex rounded-full p-0.5 text-[var(--muted-text)] hover:bg-[var(--row-hover)] hover:text-[var(--ink)]"
+        onClick={remove}
+      >
+        <X className="size-3" />
+      </button>
+    </span>
+  )
+}
+
+const AttachmentChip = memo(
+  AttachmentChipImpl,
+  (prev, next) => prev.attachment === next.attachment && prev.onRemove === next.onRemove,
+)
 
 export function Composer({ state }: { state: Record<string, any> }) {
   const composer = useComposer(state)
@@ -38,6 +91,15 @@ export function Composer({ state }: { state: Record<string, any> }) {
     hasThread: Boolean(composer.thread),
     threadId: composer.thread?.id ?? null,
   })
+  const removeAttachment = useCallback((id: any) => {
+    composer.onRemoveAttachment(id)
+  }, [composer.onRemoveAttachment])
+  const setPermissionsMenuOpen = useCallback((open: boolean) => {
+    patchState({ openComposerMenu: open ? "permissions" : null })
+  }, [])
+  const setModelMenuOpen = useCallback((open: boolean) => {
+    patchState({ openComposerMenu: open ? "model" : null })
+  }, [])
 
   return (
     <div
@@ -49,26 +111,17 @@ export function Composer({ state }: { state: Record<string, any> }) {
       {composer.attachments.length ? (
         <div className="mx-auto mb-1.5 flex w-full max-w-3xl flex-wrap gap-1.5">
           {composer.attachments.map((attachment: any) => (
-            <span
+            <AttachmentChip
               key={attachment.id}
-              className="inline-flex items-center gap-1 rounded-full border border-[var(--hairline)] bg-[var(--canvas-soft)] px-2 py-0.5 text-[11.5px] text-[var(--ink)]"
-            >
-              {attachment.name}
-              <button
-                type="button"
-                aria-label="Remove attachment"
-                className="ml-0.5 inline-flex rounded-full p-0.5 text-[var(--muted-text)] hover:bg-[var(--row-hover)] hover:text-[var(--ink)]"
-                onClick={() => composer.onRemoveAttachment(attachment.id)}
-              >
-                <X className="size-3" />
-              </button>
-            </span>
+              attachment={attachment}
+              onRemove={removeAttachment}
+            />
           ))}
         </div>
       ) : null}
 
       <form
-        className="codex-floating-pad relative mx-auto w-full max-w-3xl p-1.5"
+        className="codex-floating-pad codex-mobile-composer-pad relative mx-auto w-full max-w-3xl p-1.5"
         onSubmit={composer.onSubmit}
       >
         <ComposerSuggestions view={suggestions} />
@@ -100,7 +153,10 @@ export function Composer({ state }: { state: Record<string, any> }) {
             >
               <Paperclip className="size-4" />
             </Button>
-            <DropdownMenu>
+            <DropdownMenu
+              open={state.openComposerMenu === "permissions"}
+              onOpenChange={setPermissionsMenuOpen}
+            >
               <DropdownMenuTrigger asChild>
                 <Button
                   type="button"
@@ -128,10 +184,11 @@ export function Composer({ state }: { state: Record<string, any> }) {
 
           {/* right actions */}
           <div className="flex min-w-0 shrink-0 items-center gap-1">
-            <span className="hidden items-center gap-1 rounded-full bg-[var(--canvas-soft)] px-2 py-0.5 text-[10.5px] font-medium tabular-nums text-[var(--muted-text)] sm:inline-flex">
-              ctx {composer.tokenDial.percent}%
-            </span>
-            <DropdownMenu>
+            <ContextDial dial={composer.tokenDial} />
+            <DropdownMenu
+              open={state.openComposerMenu === "model"}
+              onOpenChange={setModelMenuOpen}
+            >
               <DropdownMenuTrigger asChild>
                 <Button
                   type="button"
@@ -161,7 +218,7 @@ export function Composer({ state }: { state: Record<string, any> }) {
                 >
                   {composer.models.map((model: any) => (
                     <DropdownMenuRadioItem key={model.id || model.model} value={model.model || model.id}>
-                      {model.displayName || model.model || model.id}
+                      {composer.displayModelName(model)}
                     </DropdownMenuRadioItem>
                   ))}
                 </DropdownMenuRadioGroup>
@@ -184,7 +241,7 @@ export function Composer({ state }: { state: Record<string, any> }) {
         </div>
 
         {composer.thread ? (
-          <div className="mx-auto mt-1.5 flex w-full max-w-3xl min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 overflow-hidden px-1 text-[11px] text-[var(--muted-text)]">
+          <div className="mx-auto mt-1.5 hidden w-full max-w-3xl min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 overflow-hidden px-1 text-[11px] text-[var(--muted-text)] sm:flex">
             <span className="text-[var(--muted-text-soft)]">PROJECT</span>
             <span className="min-w-0 max-w-[42vw] truncate font-medium text-[var(--ink)] sm:max-w-none">{composer.selectedProject?.name || "Local"}</span>
             <span className="text-[var(--muted-text-soft)]">·</span>
